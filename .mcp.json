@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "opencode-orchestrator": {
+      "command": "python3",
+      "args": [
+        "./mcp/server.py"
+      ],
+      "cwd": ".",
+      "env_vars": [
+        "CODEX_HOME",
+        "OPENCODE_ORCHESTRATOR_STATE_ROOT",
+        "OPENCODE_SERVER_URL",
+        "OPENCODE_SERVER_USERNAME",
+        "OPENCODE_SERVER_PASSWORD"
+      ],
+      "enabled": true,
+      "startup_timeout_sec": 10,
+      "tool_timeout_sec": 90000,
+      "default_tools_approval_mode": "auto",
+      "tools": {
+        "abort_task": {
+          "approval_mode": "prompt"
+        }
+      }
+    }
+  }
+}

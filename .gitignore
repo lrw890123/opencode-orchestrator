@@ -1,0 +1,9 @@
+.worktrees/
+__pycache__/
+*.py[cod]
+work/
+.install/
+install-records/
+.DS_Store
+.coverage
+htmlcov/

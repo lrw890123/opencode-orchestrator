@@ -1,0 +1,20 @@
+{
+  "name": "opencode-orchestrator-local",
+  "interface": {
+    "displayName": "OpenCode Orchestrator Local"
+  },
+  "plugins": [
+    {
+      "name": "opencode-orchestrator",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

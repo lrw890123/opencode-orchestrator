@@ -1,0 +1,22 @@
+{
+  "name": "opencode-orchestrator",
+  "version": "2.1.3",
+  "description": "Delegate approved coding tasks to OpenCode and resume Codex for review.",
+  "author": {
+    "name": "OpenCode Orchestrator contributors"
+  },
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "OpenCode Orchestrator",
+    "shortDescription": "Delegate to OpenCode and review the result",
+    "longDescription": "Delegate approved Git coding tasks to a local OpenCode session, wait without model polling, and resume Codex to inspect and review the result.",
+    "developerName": "OpenCode Orchestrator contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": "Delegate this approved coding task to OpenCode, then review the result."
+  }
+}
