@@ -72,7 +72,7 @@ class FakeCodexRunner:
                         {
                             "name": PLUGIN_NAME,
                             "marketplace": MARKETPLACE_NAME,
-                            "version": self.plugin_version or "2.1.4",
+                            "version": self.plugin_version or "2.1.5",
                             "installed": True,
                         }
                     ]
@@ -141,7 +141,7 @@ class PluginInstallTest(unittest.TestCase):
             )
             persisted = json.loads(record.read_text())
             self.assertEqual(persisted["status"], "PREINSTALLED")
-            self.assertEqual(persisted["plugin"]["version"], "2.1.4")
+            self.assertEqual(persisted["plugin"]["version"], "2.1.5")
             self.assertTrue(persisted["checks"]["mcp_handshake"])
             self.assertEqual(persisted["plugin"]["tool_timeout_sec"], 90000)
 
@@ -285,7 +285,7 @@ class PluginInstallTest(unittest.TestCase):
             )
             record.write_text(json.dumps(interrupted), encoding="utf-8")
             runner.plugin_installed = True
-            runner.plugin_version = "2.1.4"
+            runner.plugin_version = "2.1.5"
 
             rollback(record, runner=runner)
 
@@ -353,7 +353,7 @@ class PluginInstallTest(unittest.TestCase):
                 preinstalled["previous"]["cache"]["snapshot_fingerprint"],
             )
             activate(record, runner=runner)
-            self.assertEqual(runner.plugin_version, "2.1.4")
+            self.assertEqual(runner.plugin_version, "2.1.5")
 
             rolled_back = rollback(record, runner=runner)
 

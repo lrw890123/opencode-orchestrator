@@ -1,5 +1,5 @@
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -314,6 +314,63 @@ class ExternalResumeClient(FakeClient):
         return FakeResponse(lines)
 
 
+class LateExternalActivityClient(FakeClient):
+    """Terminal session gains external activity after resume_wait blocks."""
+
+    def __init__(self, *, finishes: bool):
+        super().__init__()
+        self.finishes = finishes
+        self.armed = False
+        self.activity_seen = False
+        self.external_busy = False
+        activity_at = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+        self.external_messages = [
+            {
+                "info": {"role": "user", "createdAt": activity_at},
+                "parts": [{"type": "text", "text": "EXTERNAL_USER_TURN"}],
+            },
+            {
+                "info": {"role": "assistant", "createdAt": activity_at},
+                "parts": [{"type": "text", "text": "EXTERNAL_ASSISTANT_TURN"}],
+            },
+        ]
+
+    def session_status(self, session_id):
+        return {"type": "busy"} if self.external_busy else None
+
+    def event_response(self):
+        lines = event({"type": "server.connected", "properties": {}})
+        if self.armed and not self.activity_seen:
+            self.activity_seen = True
+            self.external_busy = True
+            self.message_payload = self.external_messages
+            lines += event(
+                {
+                    "type": "message.updated",
+                    "properties": {"sessionID": self.session_id},
+                }
+            )
+            if self.finishes:
+                self.external_busy = False
+                lines += event(
+                    {
+                        "type": "session.idle",
+                        "properties": {"sessionID": self.session_id},
+                    }
+                )
+            return FakeResponse(lines)
+        if self.activity_seen and self.finishes:
+            self.external_busy = False
+            lines += event(
+                {"type": "session.idle", "properties": {"sessionID": self.session_id}}
+            )
+            return FakeResponse(lines)
+        lines += event(
+            {"type": "session.idle", "properties": {"sessionID": self.session_id}}
+        )
+        return FakeResponse(lines)
+
+
 class AcceptedContinuationUncertainClient(ContinueOrderingClient):
     def prompt_async(self, session_id, text, **kwargs):
         super().prompt_async(session_id, text, **kwargs)
@@ -557,6 +614,158 @@ class BridgeServiceTest(unittest.TestCase):
                     )
 
                 self.assertEqual(client.prompt_count, 0)
+
+    def test_continue_reacquires_aborted_task_in_original_session(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = ContinueOrderingClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            service.abort_task(prepared["task_id"])
+
+            result = service.reply(
+                prepared["task_id"],
+                "continue",
+                {
+                    "text": "Resume the remaining approved scope.",
+                    "reacquire": True,
+                },
+                timeout_seconds=2,
+            )
+            state = service.store.load(prepared["task_id"])
+
+            self.assertEqual(result["outcome"], "idle")
+            self.assertEqual(client.created_session_count, 1)
+            self.assertEqual(client.prompt_count, 2)
+            self.assertEqual(client.last_prompt["session_id"], "ses_fake_new")
+            self.assertIn(
+                f"[oc-task:{prepared['task_id']}] continuation 1",
+                client.last_prompt["text"],
+            )
+            self.assertEqual(
+                state["execution"]["continuation"]["dispatch_state"],
+                "SENT",
+            )
+            self.assertEqual(state["execution"]["external_reentry_count"], 1)
+            self.assertEqual(state["abort"]["state"], "SUPERSEDED")
+            self.assertEqual(
+                state["abort"]["superseded_by"],
+                "external-session-activity",
+            )
+            self.assertEqual(state["execution_state"], "COMPLETED")
+            self.assertEqual(state["phase"], Phase.COLLECTING)
+            self.assertEqual(client.abort_count, 1)
+
+    def test_continue_reacquires_completed_task_and_invalidates_review(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = ContinueOrderingClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            self.assertEqual(
+                service.store.load(prepared["task_id"])["review_state"],
+                "REVIEWING",
+            )
+
+            result = service.reply(
+                prepared["task_id"],
+                "continue",
+                {
+                    "text": "Address the review finding in the same scope.",
+                    "reacquire": True,
+                },
+                timeout_seconds=2,
+            )
+            state = service.store.load(prepared["task_id"])
+
+            self.assertEqual(result["outcome"], "idle")
+            self.assertEqual(client.created_session_count, 1)
+            self.assertEqual(client.prompt_count, 2)
+            self.assertIsNotNone(state["execution"].get("review_invalidated_at"))
+            self.assertEqual(state["execution"]["external_reentry_count"], 1)
+            self.assertEqual(state["execution_state"], "COMPLETED")
+            self.assertEqual(state["phase"], Phase.COLLECTING)
+
+    def test_continue_without_reacquire_rejects_terminal_task(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = ContinueOrderingClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            service.abort_task(prepared["task_id"])
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "reacquire=true",
+            ):
+                service.reply(
+                    prepared["task_id"],
+                    "continue",
+                    {"text": "Resume the remaining scope."},
+                    timeout_seconds=2,
+                )
+
+            state = service.store.load(prepared["task_id"])
+            self.assertEqual(state["execution_state"], "ABORTED")
+            self.assertEqual(state["abort"]["state"], "COMPLETED")
+            self.assertEqual(client.prompt_count, 1)
+
+    def test_continue_reacquire_rejects_abort_still_in_progress(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = ContinueOrderingClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            service.abort_task(prepared["task_id"])
+
+            def mark_requested(current):
+                current["abort"] = dict(current.get("abort") or {})
+                current["abort"]["state"] = "REQUESTED"
+
+            service.store.update(prepared["task_id"], mark_requested)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "abort request is still in progress",
+            ):
+                service.reply(
+                    prepared["task_id"],
+                    "continue",
+                    {
+                        "text": "Resume the remaining scope.",
+                        "reacquire": True,
+                    },
+                    timeout_seconds=2,
+                )
+
+            self.assertEqual(client.prompt_count, 1)
+
+    def test_continue_reacquire_rejects_busy_terminal_session(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = ContinueOrderingClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            service.abort_task(prepared["task_id"])
+            client.scenario = "idle_busy"
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "still busy; use resume_wait",
+            ):
+                service.reply(
+                    prepared["task_id"],
+                    "continue",
+                    {
+                        "text": "Resume the remaining scope.",
+                        "reacquire": True,
+                    },
+                    timeout_seconds=2,
+                )
+
+            state = service.store.load(prepared["task_id"])
+            self.assertEqual(state["execution_state"], "ABORTED")
+            self.assertEqual(client.prompt_count, 1)
 
     def test_accepted_uncertain_continuation_is_recovered_without_resend(self):
         with TemporaryDirectory() as tmp:
@@ -1027,6 +1236,105 @@ class BridgeServiceTest(unittest.TestCase):
             self.assertEqual(client.created_session_count, 1)
             self.assertEqual(client.prompt_count, 1)
             self.assertEqual(client.abort_count, 1)
+
+    def test_resume_blocks_then_adopts_late_external_activity(self):
+        for finishes in (False, True):
+            with self.subTest(finishes=finishes), TemporaryDirectory() as tmp:
+                source = create_repo(Path(tmp) / "source")
+                client = LateExternalActivityClient(finishes=finishes)
+                service = self.make_service(tmp, client)
+                prepared = self._prime_reviewing_task(service, source)
+                service.abort_task(prepared["task_id"])
+                client.armed = True
+
+                with service.wait_coordinator.attach(
+                    prepared["task_id"], "req-late-activity"
+                ) as lease:
+                    resumed = service.resume_wait(prepared["task_id"], 2, lease)
+                state = service.store.load(prepared["task_id"])
+
+                self.assertEqual(state["execution"]["external_reentry_count"], 1)
+                self.assertEqual(state["abort"]["state"], "SUPERSEDED")
+                self.assertEqual(client.created_session_count, 1)
+                self.assertEqual(client.prompt_count, 1)
+                if finishes:
+                    self.assertEqual(resumed["outcome"], "COMPLETED")
+                    self.assertEqual(state["execution_state"], "COMPLETED")
+                    self.assertEqual(state["phase"], Phase.COLLECTING)
+                else:
+                    self.assertEqual(resumed["outcome"], "INTERRUPTED")
+                    self.assertEqual(state["execution_state"], "RUNNING")
+                    self.assertEqual(state["phase"], Phase.PAUSED)
+
+    def test_resume_block_without_activity_preserves_terminal_state(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = LateExternalActivityClient(finishes=True)
+            client.activity_seen = True
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            service.abort_task(prepared["task_id"])
+
+            with service.wait_coordinator.attach(
+                prepared["task_id"], "req-quiet-block"
+            ) as lease:
+                resumed = service.resume_wait(prepared["task_id"], 1, lease)
+            state = service.store.load(prepared["task_id"])
+
+            self.assertEqual(resumed["outcome"], "ABORTED")
+            self.assertEqual(resumed["reason"], "current-state")
+            self.assertEqual(state["execution_state"], "ABORTED")
+            self.assertEqual(state["abort"]["state"], "COMPLETED")
+            self.assertNotIn("external_reentry_count", state["execution"])
+
+    def test_collect_reacquires_completed_external_turn_after_abort(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = FakeClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            service.abort_task(prepared["task_id"])
+            completed_at = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+            client.message_payload = [
+                {
+                    "info": {
+                        "role": "assistant",
+                        "createdAt": completed_at,
+                    },
+                    "parts": [
+                        {"type": "text", "text": "EXTERNAL_TURN_DONE"},
+                    ],
+                }
+            ]
+
+            projected = service.status(prepared["task_id"])
+            result = service.collect_result(prepared["task_id"])
+            state = service.store.load(prepared["task_id"])
+
+            self.assertEqual(projected["execution_state"], "COMPLETED")
+            self.assertEqual(projected["phase"], Phase.COLLECTING)
+            self.assertEqual(result["assistant_result"], "EXTERNAL_TURN_DONE")
+            self.assertEqual(state["execution_state"], "COMPLETED")
+            self.assertEqual(state["phase"], Phase.REVIEWING)
+            self.assertEqual(state["review_state"], "REVIEWING")
+            self.assertEqual(state["abort"]["state"], "SUPERSEDED")
+            self.assertEqual(state["execution"]["external_reentry_count"], 1)
+            self.assertEqual(client.created_session_count, 1)
+
+    def test_collect_rejects_live_external_turn_still_running(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = FakeClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            client.scenario = "idle_busy"
+
+            with self.assertRaisesRegex(ValueError, "resume_wait"):
+                service.collect_result(prepared["task_id"])
+
+            state = service.store.load(prepared["task_id"])
+            self.assertEqual(state["execution_state"], "COMPLETED")
+            self.assertEqual(state["phase"], Phase.REVIEWING)
 
     def test_large_unapproved_task_stops_before_worktree_creation(self):
         with TemporaryDirectory() as tmp:

@@ -56,7 +56,7 @@ python3 scripts/install_plugin.py activate \
 
 2.1.4 会合并 OpenCode session-scoped 与 legacy pending-input 接口并按 request/session 去重；任一接口仍有请求时都不会把它清空。与 permission `call_id` 关联的工具会显示为 `waiting_permission`，不再把尚未开始执行的命令误报成普通 `running`。
 
-如果用户在 OpenCode 窗口中直接续写一个已被编排器记为 `COMPLETED` 或 `ABORTED` 的原 session，`task_status` 会以只读方式展示实时推导的 `RUNNING` 或 `INPUT_REQUIRED`，但不会偷偷改写任务记录。随后显式调用 `resume_wait`，或者针对同一 session 当前仍 pending 的精确 request ID 调用 `reply_and_wait`，才会在 WaitLease 下持久化重新接管；task ID、session、worktree、模型和 effort 均保持不变。旧 abort 会保留审计信息并标记为 `SUPERSEDED`，idle、旧心跳或陈旧工具记录不会复活任务。
+如果同一 OpenCode session 在任务被记为 `COMPLETED` 或 `ABORTED` 后出现新活动——无论来自用户在 OpenCode 里的直接续写，还是来自 Codex 自身的驱动——`task_status` 会以只读方式展示实时推导的 `RUNNING`、`INPUT_REQUIRED`，或已结束新 turn 的 `COMPLETED/COLLECTING`，但不会偷偷改写任务记录。重新接管有四条等价路径：忙等期间或等待外部活动时调用 `resume_wait`（它会在 terminal 状态下阻塞挂等，检测到新 live 活动即原地收养）、针对同一 session 当前仍 pending 的精确 request ID 调用 `reply_and_wait`、需要由 Codex 亲自注入下一条消息时调用 `reply_and_wait` 的 `kind=continue` 并携带 `payload.reacquire=true`、或对已完成的新 turn 调用 `collect_result`。这些操作都在 WaitLease 下持久化接管；task ID、session、worktree、模型和 effort 均保持不变。旧 abort 会保留审计信息并标记为 `SUPERSEDED`，旧心跳、陈旧工具记录和没有新消息的 idle session 不会复活任务。
 
 权限回复可选传入 `remember_for_task=true`。它只允许与 `response=once`、`user_approved=true` 和包含 permission 及精确目标 pattern 的 `approval_basis` 一起使用；编排器从当前 live request 生成 task-local allow rule，不接受调用方另传更宽 pattern，也不会覆盖 deny 或非绕过安全门。
 
@@ -64,7 +64,7 @@ MCP 进程在现有 SSE 连接内执行本地 pending-input probe 与进度诊�
 
 当 Codex 客户端为 MCP 调用提供 `progressToken` 时，等待工具会通过标准 `notifications/progress` 在工具卡中显示节流后的执行摘要。摘要只包含连接、分析/编辑、工具名称、工作树更新和等待输入等状态；不包含推理文本、命令参数、文件内容或工具输出。通知由本地 MCP 进程发送，不会唤醒 Codex 模型，也不会产生额外的状态轮询。
 
-2.1.4 对外固定暴露 exactly eight public tools：`delegate_and_wait`、`reply_and_wait`、`resume_wait`、`task_status`、`read_transcript`、`collect_result`、`cancel_wait` 和 `abort_task`。`kind=continue` 复用 `reply_and_wait`，没有新增冗余工具；只允许 PAUSED + idle + 无 pending input/tool 的原任务，并通过 continuation marker 对不确定发送进行无重发恢复。单工具取消实验的结论是 `production_supported=false`，因此本版本不提供 `cancel_tool_call`；只有显式 `abort_task` 才主动中止 OpenCode，之后由用户直接在原 session 开启的新 turn 仍可按上述实时证据重新接管。
+2.1.4 对外固定暴露 exactly eight public tools：`delegate_and_wait`、`reply_and_wait`、`resume_wait`、`task_status`、`read_transcript`、`collect_result`、`cancel_wait` 和 `abort_task`。`kind=continue` 复用 `reply_and_wait`，没有新增冗余工具；对 `PAUSED + idle + 无 pending input/tool` 的原任务直接放行，对 `COMPLETED`/`ABORTED` 的 terminal 任务要求显式 `payload.reacquire=true`（terminal 记录被 `SUPERSEDED`，陈旧 review 状态失效），并通过 continuation marker 对不确定发送进行无重发恢复。单工具取消实验的结论是 `production_supported=false`，因此本版本不提供 `cancel_tool_call`；只有显式 `abort_task` 才主动中止 OpenCode，之后的新 turn 无论由用户还是 Codex 发起，均可按上述实时证据或显式 reacquire 重新接管。
 
 ## Review 边界
 

@@ -1135,6 +1135,141 @@ class BridgeService:
             )
         return None
 
+    def _terminal_execution_state(self, task_id: str) -> str | None:
+        """Return the persisted execution state when it is terminal."""
+
+        state = self.store.load(task_id)
+        if state["execution_state"] in {
+            ExecutionState.COMPLETED.value,
+            ExecutionState.ABORTED.value,
+        }:
+            return state["execution_state"]
+        return None
+
+    def _reentry_probe_due(self, state: dict) -> bool:
+        """Return whether a terminal-reentry activity probe may run now."""
+
+        progress = state.get("progress") or {}
+        policy = state.get("progress_policy") or {}
+        interval = policy.get("input_probe_interval_seconds", 15)
+        if not isinstance(interval, int) or isinstance(interval, bool) or interval < 0:
+            interval = 15
+        last = progress.get("last_reentry_probe_at")
+        if not isinstance(last, str) or not last.strip():
+            return True
+        try:
+            timestamp = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            timestamp = timestamp.astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            return True
+        return (datetime.now(timezone.utc) - timestamp).total_seconds() >= interval
+
+    def _adopt_terminal_activity(
+        self,
+        task_id: str,
+        client,
+        session_id: str,
+        event: dict,
+    ) -> None:
+        """Reopen a terminal task when live session activity re-enters it."""
+
+        if not is_meaningful_progress(event, session_id):
+            return
+        event_type = event.get("type") if isinstance(event, dict) else None
+        low_frequency = event_type in {"session.idle", "session.error"} or (
+            isinstance(event_type, str)
+            and (
+                event_type.startswith("permission.")
+                or event_type.startswith("question.")
+            )
+        )
+        state = self.store.load(task_id)
+        if state["execution_state"] not in {
+            ExecutionState.COMPLETED.value,
+            ExecutionState.ABORTED.value,
+        }:
+            return
+        if not low_frequency and not self._reentry_probe_due(state):
+            return
+        if not low_frequency:
+            def mark_probe(current: dict) -> None:
+                progress = dict(current.get("progress") or {})
+                progress["last_reentry_probe_at"] = utc_now()
+                current["progress"] = progress
+
+            state = self.store.update(task_id, mark_probe)
+        live_progress = self._progress_snapshot(
+            state,
+            client,
+            session_id,
+            persist=False,
+        )
+        if self._terminal_live_projection(state, live_progress) is None:
+            return
+        self._reopen_terminal_task(task_id, live_progress)
+
+    def _wait_for_terminal_reentry(
+        self,
+        task_id: str,
+        client,
+        session_id: str,
+        timeout_seconds: int,
+        lease: WaitLease,
+        progress: Callable[[str], None] | None = None,
+    ) -> dict:
+        """Block on a terminal task's session until external activity re-enters.
+
+        The wait stays attached without mutating the terminal record.  When a
+        live session event re-enters the session, the task is reopened first
+        so the same event stream records its outcome on the reacquired task.
+        """
+
+        try:
+            outcome = self._wait_for_events(
+                task_id,
+                client,
+                session_id,
+                timeout_seconds,
+                lease,
+                lambda: None,
+                progress,
+                adopt_terminal=True,
+            )
+        except OpenCodeError as error:
+            if self._terminal_execution_state(task_id) is not None:
+                state = self.store.load(task_id)
+                return self._current_result(state)
+            return self._interrupted(
+                task_id,
+                client,
+                session_id,
+                "resume-connection-failed",
+                str(error),
+            )
+        if self._terminal_execution_state(task_id) is not None:
+            state = self.store.load(task_id)
+            if outcome.kind in {"permission", "question"}:
+                live_progress = self._progress_snapshot(
+                    state,
+                    client,
+                    session_id,
+                    persist=False,
+                )
+                if self._terminal_live_projection(state, live_progress) is not None:
+                    self._reopen_terminal_task(task_id, live_progress)
+                    return self._record_outcome(task_id, client, session_id, outcome)
+            if outcome.kind == "cancelled":
+                return self._result(
+                    state,
+                    "WAIT_CANCELLED",
+                    raw_outcome="cancelled",
+                    reason="current-state",
+                )
+            return self._current_result(state)
+        return self._record_outcome(task_id, client, session_id, outcome)
+
     def _project_live_state(self, state: dict, progress: dict) -> dict:
         refreshed = deepcopy(state)
         refreshed_progress = deepcopy(progress)
@@ -1149,8 +1284,13 @@ class BridgeService:
             ) = projection
         return refreshed
 
-    def _reopen_terminal_task(self, task_id: str, progress: dict | None = None) -> dict:
-        """Persist a lease-owned transition for externally resumed session work."""
+    def _persist_terminal_reentry(
+        self,
+        task_id: str,
+        progress: dict | None,
+        target: tuple[str, str, str],
+    ) -> dict:
+        """Adopt externally resumed work after an explicit task operation."""
 
         detected_at = utc_now()
 
@@ -1179,15 +1319,30 @@ class BridgeService:
             }:
                 execution["review_invalidated_at"] = detected_at
             current["execution"] = execution
-            current["execution_state"] = ExecutionState.RUNNING.value
-            current["phase"] = Phase.RUNNING
-            current["review_state"] = ReviewState.REVISION_REQUESTED.value
+            (
+                current["execution_state"],
+                current["phase"],
+                current["review_state"],
+            ) = target
             if progress is not None:
                 current_progress = deepcopy(progress)
                 current_progress["external_activity_detected"] = True
                 current["progress"] = current_progress
 
         return self.store.update(task_id, reopen)
+
+    def _reopen_terminal_task(self, task_id: str, progress: dict | None = None) -> dict:
+        """Persist a running transition for externally resumed session work."""
+
+        return self._persist_terminal_reentry(
+            task_id,
+            progress,
+            (
+                ExecutionState.RUNNING.value,
+                Phase.RUNNING,
+                ReviewState.REVISION_REQUESTED.value,
+            ),
+        )
 
     def _preflight_wait(self, task_id: str, client, session_id: str) -> EventOutcome | None:
         """Reconcile pending input and decide whether SSE waiting may proceed."""
@@ -1728,6 +1883,7 @@ class BridgeService:
         lease: WaitLease,
         on_connected: Callable[[], None],
         on_progress: Callable[[str], None] | None = None,
+        adopt_terminal: bool = False,
     ) -> EventOutcome:
         deadline = time.monotonic() + timeout_seconds
         callback_called = False
@@ -1743,6 +1899,8 @@ class BridgeService:
         def observe(event: dict, counters: dict[str, int]) -> EventOutcome | None:
             nonlocal deferred_connected_outcome
             event_type = event.get("type") if isinstance(event, dict) else None
+            if adopt_terminal:
+                self._adopt_terminal_activity(task_id, client, session_id, event)
             observed = self._observe_event(task_id, session_id)(event, counters)
             if observed is not None:
                 return observed
@@ -1764,7 +1922,14 @@ class BridgeService:
                 outcome = deferred_connected_outcome
                 deferred_connected_outcome = None
                 return EventOutcome(outcome.kind, outcome.event, counters)
-            if event_type == "server.heartbeat" and self._input_probe_due(task_id):
+            if (
+                event_type == "server.heartbeat"
+                and self._input_probe_due(task_id)
+                and not (
+                    adopt_terminal
+                    and self._terminal_execution_state(task_id) is not None
+                )
+            ):
                 before = self.store.load(task_id).get("permission_audit") or []
                 before_count = len(before) if isinstance(before, list) else 0
                 preflight = self._preflight_wait(task_id, client, session_id)
@@ -1966,7 +2131,14 @@ class BridgeService:
                 persist=False,
             )
             if self._terminal_live_projection(state, live_progress) is None:
-                return self._current_result(state)
+                return self._wait_for_terminal_reentry(
+                    task_id,
+                    client,
+                    session_id,
+                    timeout_seconds,
+                    lease,
+                    progress,
+                )
             state = self._reopen_terminal_task(task_id, live_progress)
 
         continuation_error = self._reconcile_continuation_dispatch(
@@ -2066,7 +2238,25 @@ class BridgeService:
                 client.prompt_async(session_id, text, **self._prompt_options(request))
 
         elif kind == "continue":
-            if (
+            terminal_reacquire = state["execution_state"] in {
+                ExecutionState.COMPLETED.value,
+                ExecutionState.ABORTED.value,
+            }
+            if terminal_reacquire:
+                if payload.get("reacquire") is not True:
+                    raise ValueError(
+                        "cannot continue a completed or aborted task unless "
+                        "payload.reacquire=true confirms re-acquisition of its session"
+                    )
+                if not session_id:
+                    raise ValueError(
+                        "cannot continue a terminal task without an OpenCode session"
+                    )
+                if (state.get("abort") or {}).get("state") == "REQUESTED":
+                    raise ValueError(
+                        "cannot continue while an abort request is still in progress"
+                    )
+            elif (
                 state["execution_state"] != ExecutionState.RUNNING.value
                 or state["phase"] != Phase.PAUSED
             ):
@@ -2102,6 +2292,9 @@ class BridgeService:
                 raise ValueError(
                     "cannot continue while the OpenCode session is still busy; use resume_wait"
                 )
+
+            if terminal_reacquire:
+                state = self._reopen_terminal_task(task_id)
 
             execution = state.get("execution") or {}
             continuation_round = int(execution.get("continuation_round", 0)) + 1
@@ -2371,11 +2564,43 @@ class BridgeService:
 
     def collect_result(self, task_id: str, review_evidence: dict | None = None) -> dict:
         state = self.store.load(task_id)
+        client = None
+        session_id = state.get("opencode", {}).get("session_id")
+        if (
+            state["execution_state"]
+            in {ExecutionState.COMPLETED.value, ExecutionState.ABORTED.value}
+            and session_id
+        ):
+            client = self._client(state)
+            live_progress = self._progress_snapshot(
+                state,
+                client,
+                session_id,
+                persist=False,
+            )
+            projection = self._terminal_live_projection(state, live_progress)
+            if projection is not None:
+                projected_execution = projection[0]
+                if projected_execution != ExecutionState.COMPLETED.value:
+                    next_action = (
+                        "reply_and_wait"
+                        if projected_execution == ExecutionState.INPUT_REQUIRED.value
+                        else "resume_wait"
+                    )
+                    raise ValueError(
+                        "cannot collect while external session is "
+                        f"{projected_execution}; use {next_action}"
+                    )
+                state = self._persist_terminal_reentry(
+                    task_id,
+                    live_progress,
+                    projection,
+                )
         if state["execution_state"] != ExecutionState.COMPLETED.value:
             raise ValueError(
                 f"cannot collect task in execution state {state['execution_state']}"
             )
-        client = self._client(state)
+        client = client or self._client(state)
         session_id = state["opencode"]["session_id"]
         assistant_full = last_assistant_text(client.messages(session_id, limit=10000))
         assistant_result, truncated = truncate_text(assistant_full)

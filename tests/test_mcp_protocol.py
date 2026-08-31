@@ -87,7 +87,7 @@ class MCPProtocolTest(unittest.TestCase):
             initialized = next(message for message in messages if message.get("id") == 1)
             self.assertEqual(initialized["result"]["protocolVersion"], "2025-06-18")
             self.assertFalse(initialized["result"]["capabilities"]["tools"]["listChanged"])
-            self.assertEqual(initialized["result"]["serverInfo"]["version"], "2.1.4")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"], "2.1.5")
             listed = next(message for message in messages if message.get("id") == 2)
             self.assertEqual(len(listed["result"]["tools"]), 8)
             self.assertTrue(

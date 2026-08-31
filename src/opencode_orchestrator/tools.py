@@ -233,9 +233,11 @@ TOOL_DEFINITIONS = (
         "reply_and_wait",
         (
             "Reply to an OpenCode question, permission request, review round, or explicitly "
-            "continue an idle paused session, then keep waiting. Approving sensitive "
-            "permissions requires user_approved=true and an action-specific approval_basis "
-            "naming the permission and target."
+            "continue an idle paused session, then keep waiting. A COMPLETED or ABORTED task "
+            "can be re-acquired in its original session with payload.reacquire=true, which "
+            "supersedes the terminal record and continues the same task without a new "
+            "session. Approving sensitive permissions requires user_approved=true and an "
+            "action-specific approval_basis naming the permission and target."
         ),
         {
             "type": "object",
@@ -272,6 +274,14 @@ TOOL_DEFINITIONS = (
                             "description": (
                                 "With response=once and explicit approval, remember the exact "
                                 "live permission patterns only for this orchestrator task."
+                            ),
+                        },
+                        "reacquire": {
+                            "type": "boolean",
+                            "description": (
+                                "Must be true to continue a COMPLETED or ABORTED task by "
+                                "re-acquiring its original OpenCode session. The terminal "
+                                "record is superseded and reviewed state invalidated."
                             ),
                         },
                     },

@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import stat
 import subprocess
@@ -367,6 +368,106 @@ class MCPServerE2ETest(unittest.TestCase):
                 self.assertEqual(resumed["outcome"], "COMPLETED")
                 self.assertEqual(final_state["abort"]["state"], "SUPERSEDED")
                 self.assertEqual(final_state["opencode"]["session_id"], session_id)
+                self.assertEqual(server.created_session_count, 1)
+                self.assertEqual(server.prompt_count, 1)
+            finally:
+                client.close()
+
+    def test_collect_reacquires_external_turn_that_finished_after_abort(self):
+        with TemporaryDirectory() as tmp, FakeOpenCodeServer("idle") as server:
+            root = Path(tmp)
+            state_root = root / "state"
+            source = create_repo(root / "source")
+            client = self.start_client(state_root)
+            try:
+                initial = client.request(self.delegate_call(47, source, server), timeout=5)
+                self.assertEqual(
+                    initial["result"]["structuredContent"]["outcome"],
+                    "COMPLETED",
+                )
+                task_id = self.only_task_id(state_root)
+                store = TaskStore(state_root)
+                session_id = store.load(task_id)["opencode"]["session_id"]
+                session = server.sessions[session_id]
+
+                client.request(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 48,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "collect_result",
+                            "arguments": {"task_id": task_id},
+                        },
+                    },
+                    timeout=5,
+                )
+                client.request(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 49,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "abort_task",
+                            "arguments": {"task_id": task_id},
+                        },
+                    },
+                    timeout=5,
+                )
+                completed_at = (
+                    datetime.now(timezone.utc) + timedelta(seconds=1)
+                ).isoformat()
+                with server.condition:
+                    session.busy = False
+                    session.messages.append(
+                        {
+                            "info": {
+                                "role": "assistant",
+                                "createdAt": completed_at,
+                            },
+                            "parts": [
+                                {"type": "text", "text": "EXTERNAL_TURN_DONE"},
+                            ],
+                        }
+                    )
+
+                status = client.request(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 50,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "task_status",
+                            "arguments": {"task_id": task_id},
+                        },
+                    },
+                    timeout=5,
+                )["result"]["structuredContent"]
+                collected = client.request(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 51,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "collect_result",
+                            "arguments": {"task_id": task_id},
+                        },
+                    },
+                    timeout=5,
+                )["result"]["structuredContent"]
+                final_state = store.load(task_id)
+
+                self.assertEqual(status["execution_state"], "COMPLETED")
+                self.assertEqual(status["artifacts"]["state"]["phase"], "COLLECTING")
+                self.assertEqual(collected["outcome"], "COMPLETED")
+                self.assertEqual(collected["review_state"], "REVIEWING")
+                self.assertEqual(
+                    collected["artifacts"]["result"]["assistant_result"],
+                    "EXTERNAL_TURN_DONE",
+                )
+                self.assertEqual(final_state["abort"]["state"], "SUPERSEDED")
+                self.assertEqual(final_state["opencode"]["session_id"], session_id)
+                self.assertEqual(final_state["wait_state"], "DETACHED")
                 self.assertEqual(server.created_session_count, 1)
                 self.assertEqual(server.prompt_count, 1)
             finally:

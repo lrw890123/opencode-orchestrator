@@ -2,6 +2,23 @@
 
 All notable changes to OpenCode Orchestrator are documented here.
 
+## Unreleased
+
+## 2.1.5
+
+- Let `reply_and_wait` with `kind=continue` re-acquire a `COMPLETED` or
+  `ABORTED` task in its original OpenCode session when
+  `payload.reacquire=true`, superseding the terminal record and invalidating
+  stale review state. This unblocks fully agent-driven recovery without a
+  human message in OpenCode.
+- Let `resume_wait` block on a terminal task's session and adopt new live
+  activity as it arrives instead of returning the terminal state immediately.
+- Let `collect_result` reacquire an externally continued turn that already
+  completed before Codex resumed, while preserving the original task, session,
+  and worktree.
+- Reject collection while the external turn is still running or awaiting input,
+  and return actionable MCP input errors instead of generic internal errors.
+
 ## 2.1.4
 
 - Detect direct user continuations in an existing OpenCode session after the

@@ -98,6 +98,8 @@ class ToolService:
             )
         if message.startswith("cannot continue"):
             return message
+        if message.startswith("cannot send review in phase"):
+            return "review reply requires collect_result to enter REVIEWING"
         if message.startswith("task-local permission rules require"):
             return message
         if message.startswith("cannot answer ") or message in {
@@ -268,7 +270,17 @@ class ToolService:
     def _validate_reply_payload(self, kind: str, value) -> dict:
         payload = self._object(value, "payload")
         if kind in {"review", "continue"}:
-            self._keys(payload, required={"text"}, allowed={"text"}, label="payload")
+            if kind == "continue":
+                self._keys(
+                    payload,
+                    required={"text"},
+                    allowed={"text", "reacquire"},
+                    label="payload",
+                )
+                if "reacquire" in payload:
+                    self._boolean(payload["reacquire"], "payload.reacquire")
+            else:
+                self._keys(payload, required={"text"}, allowed={"text"}, label="payload")
             self._nonblank(payload["text"], "payload.text")
         elif kind == "permission":
             allowed = {
@@ -491,9 +503,19 @@ class ToolService:
                 if "review_evidence" in arguments
                 else None
             )
-            collected = self.bridge.collect_result(task_id, review_evidence=evidence)
-            if evidence is not None:
-                self.bridge.approve_review(task_id, evidence)
+            with self.coordinator.attach(task_id, request_id):
+                try:
+                    collected = self.bridge.collect_result(
+                        task_id,
+                        review_evidence=evidence,
+                    )
+                    if evidence is not None:
+                        self.bridge.approve_review(task_id, evidence)
+                except ValueError as error:
+                    message = str(error)
+                    if message.startswith("cannot collect"):
+                        raise ToolInputError(message) from error
+                    raise
             state = self.bridge.status(task_id)
             return self._common(
                 state,

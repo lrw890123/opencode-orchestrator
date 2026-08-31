@@ -47,6 +47,7 @@ class FakeBridge:
         self.abort_calls = []
         self.approvals = []
         self.reply_error = None
+        self.collect_error = None
         self.state = {
             "schema_version": 3,
             "task_id": TASK_ID,
@@ -89,6 +90,8 @@ class FakeBridge:
         return {"task_id": task_id, "messages": [], "next_cursor": None}
 
     def collect_result(self, task_id, review_evidence=None):
+        if self.collect_error is not None:
+            raise self.collect_error
         self.state["execution_state"] = "COMPLETED"
         self.state["review_state"] = "REVIEWING"
         self.state["phase"] = "REVIEWING"
@@ -420,6 +423,82 @@ class ToolServiceTest(unittest.TestCase):
                     "payload": {"request_id": "per-risky", "response": "once"},
                 },
                 "req-risky-permission",
+            )
+
+    def test_review_before_collection_gives_actionable_input_error(self):
+        from opencode_orchestrator.tool_service import ToolInputError
+
+        tool_service, bridge = self.make_service()
+        bridge.reply_error = ValueError("cannot send review in phase COLLECTING")
+
+        with self.assertRaisesRegex(ToolInputError, "collect_result"):
+            tool_service.call(
+                "reply_and_wait",
+                {
+                    "task_id": TASK_ID,
+                    "kind": "review",
+                    "payload": {"text": "Please revise."},
+                },
+                "req-review-before-collect",
+            )
+
+    def test_continue_without_reacquire_gives_actionable_input_error(self):
+        from opencode_orchestrator.tool_service import ToolInputError
+
+        tool_service, bridge = self.make_service()
+        bridge.reply_error = ValueError(
+            "cannot continue a completed or aborted task unless "
+            "payload.reacquire=true confirms re-acquisition of its session"
+        )
+
+        with self.assertRaisesRegex(ToolInputError, "reacquire=true"):
+            tool_service.call(
+                "reply_and_wait",
+                {
+                    "task_id": TASK_ID,
+                    "kind": "continue",
+                    "payload": {"text": "Continue the remaining scope."},
+                },
+                "req-continue-terminal",
+            )
+
+    def test_continue_reacquire_payload_reaches_bridge(self):
+        tool_service, bridge = self.make_service()
+
+        tool_service.call(
+            "reply_and_wait",
+            {
+                "task_id": TASK_ID,
+                "kind": "continue",
+                "payload": {
+                    "text": "Continue the remaining scope.",
+                    "reacquire": True,
+                },
+            },
+            "req-continue-reacquire",
+        )
+
+        task_id, kind, payload = bridge.reply_calls[-1][:3]
+        self.assertEqual(task_id, TASK_ID)
+        self.assertEqual(kind, "continue")
+        self.assertEqual(
+            payload,
+            {"text": "Continue the remaining scope.", "reacquire": True},
+        )
+
+    def test_collect_invalid_state_gives_actionable_input_error(self):
+        from opencode_orchestrator.tool_service import ToolInputError
+
+        tool_service, bridge = self.make_service()
+        bridge.collect_error = ValueError(
+            "cannot collect while external session is RUNNING; use resume_wait"
+        )
+
+        with self.assertRaisesRegex(ToolInputError, "resume_wait"):
+            tool_service.call(
+                "collect_result",
+                {"task_id": TASK_ID},
+                "req-collect-running",
             )
 
     def test_collect_with_review_evidence_uses_internal_approval(self):
