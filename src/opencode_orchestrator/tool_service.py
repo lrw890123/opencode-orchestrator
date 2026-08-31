@@ -5,14 +5,20 @@ import os
 from pathlib import Path
 import re
 
+from .contracts import (
+    DEFAULT_TIMEOUT_SECONDS,
+    RISK_KEYS,
+    TASK_CONTRACT_KEYS,
+    TASK_SCHEMA_VERSION,
+    TIMEOUT_MAX_SECONDS,
+    TIMEOUT_MIN_SECONDS,
+)
 from .permission_policy import normalize_permission_policy, normalize_progress_policy
 from .tools import TOOL_DEFINITIONS
 
 
 TOOL_NAMES = {definition["name"] for definition in TOOL_DEFINITIONS}
 TASK_ID_PATTERN = re.compile(r"^oc-[A-Za-z0-9._-]+$")
-TIMEOUT_MIN = 1
-TIMEOUT_MAX = 86400
 
 
 class ToolInputError(ValueError):
@@ -78,10 +84,10 @@ class ToolService:
 
     def _timeout(self, arguments: dict) -> int:
         return self._integer(
-            arguments.get("timeout_seconds", 3600),
+            arguments.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
             "timeout_seconds",
-            TIMEOUT_MIN,
-            TIMEOUT_MAX,
+            TIMEOUT_MIN_SECONDS,
+            TIMEOUT_MAX_SECONDS,
         )
 
     @staticmethod
@@ -121,14 +127,7 @@ class ToolService:
 
     def _risk(self, value) -> dict:
         risk = self._object(value, "task_contract.risk")
-        keys = {
-            "file_count",
-            "line_count",
-            "cross_module",
-            "public_interface",
-            "dependency_change",
-            "high_risk_actions",
-        }
+        keys = set(RISK_KEYS)
         self._keys(risk, required=keys, allowed=keys, label="task_contract.risk")
         self._integer(risk["file_count"], "task_contract.risk.file_count", 0, 10**9)
         self._integer(risk["line_count"], "task_contract.risk.line_count", 0, 10**12)
@@ -142,17 +141,7 @@ class ToolService:
 
     def _task_contract(self, value) -> dict:
         contract = self._object(value, "task_contract")
-        keys = {
-            "goal",
-            "non_goals",
-            "approved_plan",
-            "allowed_paths",
-            "forbidden_actions",
-            "acceptance_criteria",
-            "test_commands",
-            "risk",
-            "user_approved",
-        }
+        keys = set(TASK_CONTRACT_KEYS)
         self._keys(contract, required=keys, allowed=keys, label="task_contract")
         self._nonblank(contract["goal"], "task_contract.goal")
         self._string_list(contract["non_goals"], "task_contract.non_goals")
@@ -234,8 +223,13 @@ class ToolService:
         artifacts: dict | None = None,
     ) -> dict:
         resolved_outcome = outcome or self._state_outcome(state)
+        resolved_next_action = next_action
+        if resolved_next_action is None and (
+            resolved_outcome == "COMPLETED" and state.get("requires_reacquire") is True
+        ):
+            resolved_next_action = "resume_wait"
         return {
-            "schema_version": 3,
+            "schema_version": TASK_SCHEMA_VERSION,
             "task_id": state["task_id"],
             "outcome": resolved_outcome,
             "execution_state": state["execution_state"],
@@ -243,7 +237,7 @@ class ToolService:
             "review_state": state.get("review_state"),
             "opencode_session_id": state.get("opencode", {}).get("session_id"),
             "summary": summary or self._summary(resolved_outcome),
-            "next_action": next_action or self._next_action(resolved_outcome),
+            "next_action": resolved_next_action or self._next_action(resolved_outcome),
             "artifacts": artifacts or {},
         }
 
@@ -260,7 +254,7 @@ class ToolService:
         }
         if required.issubset(result):
             public = dict(result)
-            public["schema_version"] = 3
+            public["schema_version"] = TASK_SCHEMA_VERSION
             return public
         state = self.bridge.status(result["task_id"])
         return self._common(state, artifacts={"result": result})

@@ -3,18 +3,20 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from opencode_orchestrator.service import BridgeService
 from opencode_orchestrator.task_state import Phase
+from tests.support.bridge_service import BridgeServiceHarness
 from tests.support.fake_opencode import FakeOpenCodeServer
 from tests.test_git_workspace import create_repo
 from tests.test_service_integration_unit import LOW_REQUEST
 
 
 class RealHttpServiceIntegrationTest(unittest.TestCase):
-    def make_service(self, root: Path, server: FakeOpenCodeServer) -> BridgeService:
-        return BridgeService(root / "state")
+    def make_service(self, root: Path, server: FakeOpenCodeServer) -> BridgeServiceHarness:
+        return BridgeServiceHarness(root / "state")
 
-    def prepare(self, root: Path, server: FakeOpenCodeServer) -> tuple[BridgeService, dict]:
+    def prepare(
+        self, root: Path, server: FakeOpenCodeServer
+    ) -> tuple[BridgeServiceHarness, dict]:
         source = create_repo(root / "source")
         service = self.make_service(root, server)
         state = service.prepare(source, "http-demo", deepcopy(LOW_REQUEST), server.base_url)

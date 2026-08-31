@@ -80,7 +80,17 @@ class LiveE2EDriverTest(unittest.TestCase):
                 "",
             )
             tests = subprocess.run(
-                [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
+                [
+                    sys.executable,
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    "tests",
+                    "-t",
+                    ".",
+                    "-v",
+                ],
                 cwd=source,
                 text=True,
                 capture_output=True,

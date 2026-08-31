@@ -2,12 +2,37 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from .contracts import (
+    DEFAULT_INPUT_PROBE_SECONDS,
+    DEFAULT_PERMISSION_ACTION,
+    DEFAULT_PERMISSION_PERSISTENCE,
+    DEFAULT_STALL_TIMEOUT_SECONDS,
+    DEFAULT_TIMEOUT_SECONDS,
+    INPUT_PROBE_MAX_SECONDS,
+    INPUT_PROBE_MIN_SECONDS,
+    RISK_FIELDS,
+    STALL_TIMEOUT_MAX_SECONDS,
+    STALL_TIMEOUT_MIN_SECONDS,
+    TASK_CONTRACT_FIELDS,
+    TASK_SCHEMA_VERSION,
+    TIMEOUT_MAX_SECONDS,
+    TIMEOUT_MIN_SECONDS,
+)
+
 
 PERMISSION_POLICY_SCHEMA = {
     "type": "object",
     "properties": {
-        "default": {"type": "string", "enum": ["allow", "ask", "deny"], "default": "allow"},
-        "persistence": {"type": "string", "enum": ["task", "project"], "default": "task"},
+        "default": {
+            "type": "string",
+            "enum": ["allow", "ask", "deny"],
+            "default": DEFAULT_PERMISSION_ACTION,
+        },
+        "persistence": {
+            "type": "string",
+            "enum": ["task", "project"],
+            "default": DEFAULT_PERMISSION_PERSISTENCE,
+        },
         "approval_basis": {
             "anyOf": [
                 {"type": "string", "minLength": 1},
@@ -36,15 +61,15 @@ PROGRESS_POLICY_SCHEMA = {
     "properties": {
         "input_probe_interval_seconds": {
             "type": "integer",
-            "minimum": 5,
-            "maximum": 300,
-            "default": 15,
+            "minimum": INPUT_PROBE_MIN_SECONDS,
+            "maximum": INPUT_PROBE_MAX_SECONDS,
+            "default": DEFAULT_INPUT_PROBE_SECONDS,
         },
         "stall_timeout_seconds": {
             "type": "integer",
-            "minimum": 30,
-            "maximum": 86400,
-            "default": 600,
+            "minimum": STALL_TIMEOUT_MIN_SECONDS,
+            "maximum": STALL_TIMEOUT_MAX_SECONDS,
+            "default": DEFAULT_STALL_TIMEOUT_SECONDS,
         },
     },
     "additionalProperties": False,
@@ -80,14 +105,7 @@ RISK_SCHEMA = {
             "items": {"type": "string"},
         },
     },
-    "required": [
-        "file_count",
-        "line_count",
-        "cross_module",
-        "public_interface",
-        "dependency_change",
-        "high_risk_actions",
-    ],
+    "required": list(RISK_FIELDS),
     "additionalProperties": False,
 }
 
@@ -108,17 +126,7 @@ TASK_CONTRACT_SCHEMA = {
         "risk": RISK_SCHEMA,
         "user_approved": {"type": "boolean"},
     },
-    "required": [
-        "goal",
-        "non_goals",
-        "approved_plan",
-        "allowed_paths",
-        "forbidden_actions",
-        "acceptance_criteria",
-        "test_commands",
-        "risk",
-        "user_approved",
-    ],
+    "required": list(TASK_CONTRACT_FIELDS),
     "additionalProperties": False,
 }
 
@@ -135,7 +143,7 @@ REVIEW_EVIDENCE_SCHEMA = {
 COMMON_OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
-        "schema_version": {"const": 3},
+        "schema_version": {"const": TASK_SCHEMA_VERSION},
         "task_id": TASK_ID_SCHEMA,
         "outcome": {
             "type": "string",
@@ -217,9 +225,9 @@ TOOL_DEFINITIONS = (
                 "effort": {"type": "string", "minLength": 1, "default": "max"},
                 "timeout_seconds": {
                     "type": "integer",
-                    "minimum": 1,
-                    "maximum": 86400,
-                    "default": 3600,
+                    "minimum": TIMEOUT_MIN_SECONDS,
+                    "maximum": TIMEOUT_MAX_SECONDS,
+                    "default": DEFAULT_TIMEOUT_SECONDS,
                 },
                 "server_url": {"type": "string", "minLength": 1},
                 "permission_policy": deepcopy(PERMISSION_POLICY_SCHEMA),
@@ -279,9 +287,9 @@ TOOL_DEFINITIONS = (
                 },
                 "timeout_seconds": {
                     "type": "integer",
-                    "minimum": 1,
-                    "maximum": 86400,
-                    "default": 3600,
+                    "minimum": TIMEOUT_MIN_SECONDS,
+                    "maximum": TIMEOUT_MAX_SECONDS,
+                    "default": DEFAULT_TIMEOUT_SECONDS,
                 },
             },
             "required": ["task_id", "kind", "payload"],
@@ -297,9 +305,9 @@ TOOL_DEFINITIONS = (
                 "task_id": TASK_ID_SCHEMA,
                 "timeout_seconds": {
                     "type": "integer",
-                    "minimum": 1,
-                    "maximum": 86400,
-                    "default": 3600,
+                    "minimum": TIMEOUT_MIN_SECONDS,
+                    "maximum": TIMEOUT_MAX_SECONDS,
+                    "default": DEFAULT_TIMEOUT_SECONDS,
                 },
             },
             "required": ["task_id"],

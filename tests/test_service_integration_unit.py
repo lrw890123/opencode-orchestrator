@@ -7,13 +7,13 @@ import threading
 import time
 import unittest
 
-from opencode_orchestrator.service import BridgeService
 from opencode_orchestrator.opencode_client import OpenCodeError
 from opencode_orchestrator.permission_policy import (
     normalize_permission_policy,
     normalize_progress_policy,
 )
 from opencode_orchestrator.task_state import Phase
+from tests.support.bridge_service import BridgeServiceHarness
 from tests.test_git_workspace import create_repo
 
 
@@ -431,7 +431,9 @@ class ClientFactory:
 
 class BridgeServiceTest(unittest.TestCase):
     def make_service(self, root, client):
-        return BridgeService(Path(root) / "state", client_factory=ClientFactory(client))
+        return BridgeServiceHarness(
+            Path(root) / "state", client_factory=ClientFactory(client)
+        )
 
     def _prime_paused_task(self, service, client, source, request=None):
         prepared = service.prepare_task(
@@ -1027,6 +1029,66 @@ class BridgeServiceTest(unittest.TestCase):
             self.assertEqual(client.created_session_count, 1)
             self.assertEqual(client.prompt_count, 1)
             self.assertEqual(client.abort_count, 1)
+
+    def test_abort_completion_message_is_not_external_session_activity(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = ExternalResumeClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            service.abort_task(prepared["task_id"])
+
+            def set_terminal_boundary(current):
+                current["progress"]["last_progress_at"] = (
+                    "2026-08-31T05:18:40+00:00"
+                )
+                current["abort"]["requested_at"] = "2026-08-31T05:18:45+00:00"
+                current["abort"]["completed_at"] = "2026-08-31T05:18:46+00:00"
+                current["review_state"] = "REVISION_REQUESTED"
+
+            service.store.update(prepared["task_id"], set_terminal_boundary)
+            abort_message_at = datetime.fromisoformat(
+                "2026-08-31T05:18:45.500+00:00"
+            )
+            client.message_payload = [
+                {
+                    "info": {
+                        "role": "assistant",
+                        "time": {
+                            "completed": int(abort_message_at.timestamp() * 1000)
+                        },
+                        "error": {
+                            "name": "MessageAbortedError",
+                            "data": {"message": "Aborted"},
+                        },
+                    },
+                    "parts": [{"type": "tool"}],
+                }
+            ]
+
+            projected = service.status(prepared["task_id"])
+            persisted = service.store.load(prepared["task_id"])
+
+            self.assertEqual(projected["execution_state"], "ABORTED")
+            self.assertEqual(projected["phase"], Phase.CANCELLED)
+            self.assertEqual(projected["review_state"], "REVISION_REQUESTED")
+            self.assertFalse(projected["progress"]["external_activity_detected"])
+            self.assertFalse(projected["requires_reacquire"])
+            self.assertEqual(persisted["execution_state"], "ABORTED")
+
+            external_message_at = datetime.fromisoformat(
+                "2026-08-31T05:18:47+00:00"
+            )
+            client.message_payload[0]["info"]["time"]["completed"] = int(
+                external_message_at.timestamp() * 1000
+            )
+            client.message_payload[0]["info"].pop("error")
+            resumed_projection = service.status(prepared["task_id"])
+
+            self.assertEqual(resumed_projection["execution_state"], "COMPLETED")
+            self.assertEqual(resumed_projection["phase"], Phase.COLLECTING)
+            self.assertEqual(resumed_projection["review_state"], "READY")
+            self.assertTrue(resumed_projection["requires_reacquire"])
 
     def test_large_unapproved_task_stops_before_worktree_creation(self):
         with TemporaryDirectory() as tmp:

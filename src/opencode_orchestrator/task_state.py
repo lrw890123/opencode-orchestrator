@@ -11,6 +11,12 @@ import secrets
 import time
 from typing import Any, Callable
 
+from .contracts import (
+    TASK_SCHEMA_VERSION,
+    default_permission_policy,
+    default_progress_policy,
+    default_progress_state,
+)
 
 class Phase:
     DRAFT = "DRAFT"
@@ -55,42 +61,6 @@ class ReviewState(str, Enum):
     REVISION_REQUESTED = "REVISION_REQUESTED"
     PASSED = "PASSED"
     AWAITING_INTEGRATION = "AWAITING_INTEGRATION"
-
-
-TRANSITIONS = {
-    Phase.DRAFT: {Phase.RISK_CHECK},
-    Phase.RISK_CHECK: {Phase.AWAITING_APPROVAL, Phase.PREPARING, Phase.FAILED},
-    Phase.AWAITING_APPROVAL: {Phase.PREPARING, Phase.CANCELLED},
-    Phase.PREPARING: {Phase.DISPATCHED, Phase.FAILED, Phase.CANCELLED},
-    Phase.DISPATCHED: {Phase.RUNNING, Phase.PAUSED, Phase.FAILED, Phase.CANCELLED},
-    Phase.RUNNING: {
-        Phase.NEEDS_INPUT,
-        Phase.PERMISSION_WAIT,
-        Phase.PAUSED,
-        Phase.STALLED,
-        Phase.FAILED,
-        Phase.COLLECTING,
-        Phase.CANCELLED,
-    },
-    Phase.NEEDS_INPUT: {Phase.RUNNING, Phase.FAILED, Phase.CANCELLED},
-    Phase.PERMISSION_WAIT: {Phase.RUNNING, Phase.FAILED, Phase.CANCELLED},
-    Phase.PAUSED: {Phase.RUNNING, Phase.STALLED, Phase.FAILED, Phase.CANCELLED},
-    Phase.STALLED: {
-        Phase.RUNNING,
-        Phase.NEEDS_INPUT,
-        Phase.PERMISSION_WAIT,
-        Phase.FAILED,
-        Phase.COLLECTING,
-        Phase.CANCELLED,
-    },
-    Phase.COLLECTING: {Phase.REVIEWING, Phase.FAILED},
-    Phase.REVIEWING: {Phase.REVISION_REQUESTED, Phase.PASSED, Phase.FAILED},
-    Phase.REVISION_REQUESTED: {Phase.RUNNING, Phase.FAILED, Phase.CANCELLED},
-    Phase.PASSED: {Phase.AWAITING_INTEGRATION},
-    Phase.AWAITING_INTEGRATION: set(),
-    Phase.FAILED: set(),
-    Phase.CANCELLED: set(),
-}
 
 
 class TaskLockError(RuntimeError):
@@ -166,7 +136,7 @@ class TaskStore:
             raise FileExistsError(f"task already exists: {task_id}")
         now = utc_now()
         state = {
-            "schema_version": 3,
+            "schema_version": TASK_SCHEMA_VERSION,
             "task_id": task_id,
             "task_fingerprint": None,
             "phase": Phase.DRAFT,
@@ -184,29 +154,11 @@ class TaskStore:
             "worktree": {},
             "opencode": {},
             "policy": {},
-            "permission_policy": {
-                "default": "allow",
-                "persistence": "task",
-                "approval_basis": None,
-                "rules": [],
-            },
-            "progress_policy": {
-                "input_probe_interval_seconds": 15,
-                "stall_timeout_seconds": 600,
-            },
+            "permission_policy": default_permission_policy(),
+            "progress_policy": default_progress_policy(),
             "permission_audit": [],
             "task_permission_rules": [],
-            "progress": {
-                "last_progress_at": now,
-                "last_progress_event": "task.created",
-                "idle_seconds": 0,
-                "heartbeat_count": 0,
-                "pending_tools": [],
-                "pending_permissions": [],
-                "pending_questions": [],
-                "diagnostic_error": None,
-                "last_input_probe_at": None,
-            },
+            "progress": default_progress_state(now, "task.created"),
             "execution": {
                 "dispatch_marker": f"[oc-task:{task_id}]",
                 "sse_reconnects": 0,
@@ -230,15 +182,6 @@ class TaskStore:
         saved["updated_at"] = utc_now()
         atomic_write_json(self.task_dir(task_id) / "state.json", saved)
         return saved
-
-    def transition(self, task_id: str, phase: str, **updates: Any) -> dict[str, Any]:
-        state = self.load(task_id)
-        current = state["phase"]
-        if phase not in TRANSITIONS.get(current, set()):
-            raise ValueError(f"invalid phase transition: {current} -> {phase}")
-        state["phase"] = phase
-        state.update(updates)
-        return self.save(task_id, state)
 
     def update(
         self,

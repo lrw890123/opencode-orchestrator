@@ -52,11 +52,22 @@ def create_source_repo(state_root: Path) -> Path:
         "        self.assertEqual(add(2, 3), 5)\n",
         encoding="utf-8",
     )
+    (source / "tests/__init__.py").write_text("", encoding="utf-8")
     (source / ".gitignore").write_text("__pycache__/\n*.py[cod]\n", encoding="utf-8")
     run(["git", "init", "-b", "main", str(source)])
     run(["git", "config", "user.email", "e2e@example.com"], cwd=source)
     run(["git", "config", "user.name", "OpenCode Plugin E2E"], cwd=source)
-    run(["git", "add", ".gitignore", "math_utils.py", "tests/test_math_utils.py"], cwd=source)
+    run(
+        [
+            "git",
+            "add",
+            ".gitignore",
+            "math_utils.py",
+            "tests/__init__.py",
+            "tests/test_math_utils.py",
+        ],
+        cwd=source,
+    )
     run(["git", "commit", "-m", "Create Plugin E2E fixture"], cwd=source)
     return source
 
@@ -111,7 +122,7 @@ def task_contract(cross_worktree_read_root: Path | None = None) -> dict:
             "Do not commit, push, publish, delete, or change dependencies",
         ],
         "acceptance_criteria": acceptance,
-        "test_commands": ["python3 -m unittest discover -s tests -v"],
+        "test_commands": ["python3 -m unittest discover -s tests -t . -v"],
         "risk": {
             "file_count": 2,
             "line_count": 20,
@@ -339,7 +350,17 @@ def execute(
             f"unexpected changed files: {first['changed_files']}",
         )
         tests = run(
-            [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
+            [
+                sys.executable,
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "tests",
+                "-t",
+                ".",
+                "-v",
+            ],
             cwd=worktree,
         )
         require("multiply" in (worktree / "math_utils.py").read_text(), "multiply is missing")
@@ -459,7 +480,9 @@ def execute(
                 "stat": first["diff_stat"],
                 "opencode": first["opencode_diff"],
             },
-            "test_command": f"{sys.executable} -m unittest discover -s tests -v",
+            "test_command": (
+                f"{sys.executable} -m unittest discover -s tests -t . -v"
+            ),
             "test_output": tests.stderr + tests.stdout,
             "poll_fallback_used": first["poll_fallback_used"],
             "transcript": transcript,

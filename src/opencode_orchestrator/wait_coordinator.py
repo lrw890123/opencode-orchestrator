@@ -6,6 +6,7 @@ import os
 import threading
 
 from .cancellation import CancellationToken
+from .contracts import TASK_SCHEMA_VERSION
 from .task_state import TaskLock, TaskLockError, TaskStore, WaitState, utc_now
 
 
@@ -159,7 +160,7 @@ class WaitCoordinator:
                 state = self.store.load(task_dir.name)
             except (FileNotFoundError, ValueError):
                 continue
-            if state.get("schema_version") != 3:
+            if state.get("schema_version") != TASK_SCHEMA_VERSION:
                 continue
             if state.get("wait_state") != WaitState.ATTACHED.value:
                 continue

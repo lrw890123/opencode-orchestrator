@@ -529,7 +529,8 @@ class FakeOpenCodeServer:
         if len(assistants) >= len(session.prompts):
             return
         text = (
-            "OPENCODE_REVIEW_ACK [oc-task:fake] python3 -m unittest discover -s tests -v"
+            "OPENCODE_REVIEW_ACK [oc-task:fake] "
+            "python3 -m unittest discover -s tests -t . -v"
             if len(session.prompts) > 1
             else "FAKE_DONE"
         )

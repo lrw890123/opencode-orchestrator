@@ -2,6 +2,13 @@
 
 All notable changes to OpenCode Orchestrator are documented here.
 
+## 2.1.5
+
+- Do not mistake an abort-generated terminal message for external session activity.
+- Direct projected external completions to `resume_wait` before collection or review.
+- Split task preparation, pending input, progress recovery, and result review out of the core service.
+- Remove the obsolete bridge CLI and unused transition facade.
+
 ## 2.1.4
 
 - Detect direct user continuations in an existing OpenCode session after the

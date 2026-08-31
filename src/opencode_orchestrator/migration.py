@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 from typing import Any
 
+from .contracts import TASK_SCHEMA_VERSION
 from .permission_policy import normalize_permission_policy, normalize_progress_policy
 from .task_state import TaskLock, TaskLockError, atomic_write_json, utc_now
 
@@ -265,7 +266,7 @@ def migrate_task_record(
     version = state.get("schema_version")
     if version == 1:
         migrated = migrate_v1_state(state)
-    elif version == 2 or version == 3:
+    elif version == 2 or version == TASK_SCHEMA_VERSION:
         migrated = deepcopy(state)
     else:
         raise ValueError(f"unsupported task schema: {version}")
@@ -278,7 +279,7 @@ def migrate_task_record(
     # the safe Task-1 defaults.  Never infer an external-directory allow rule
     # from the legacy contract's ordinary allowed_paths field.
     state_permission_present = "permission_policy" in migrated
-    if version == 3:
+    if version == TASK_SCHEMA_VERSION:
         # A v3 state is authoritative.  Recovering a missing/corrupt state
         # policy from request.json could silently restore broader authority.
         permission_present = state_permission_present
@@ -291,7 +292,7 @@ def migrate_task_record(
         permission_value = request_value.get("permission_policy")
     try:
         if (permission_present and permission_value is None) or (
-            not permission_present and version == 3
+            not permission_present and version == TASK_SCHEMA_VERSION
         ):
             raise ValueError("persisted permission policy is missing or null")
         permission_policy = normalize_permission_policy(permission_value)
@@ -315,7 +316,7 @@ def migrate_task_record(
             diagnostic, _migration_diagnostic("invalid_progress_policy")
         )
 
-    migrated["schema_version"] = 3
+    migrated["schema_version"] = TASK_SCHEMA_VERSION
     migrated["permission_policy"] = permission_policy
     migrated["progress_policy"] = progress_policy
     if "permission_audit" not in migrated or not isinstance(

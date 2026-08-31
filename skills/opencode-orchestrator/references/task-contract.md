@@ -12,7 +12,7 @@ Create a complete `delegate_and_wait` input before dispatch:
     "allowed_paths": ["src/**", "tests/**"],
     "forbidden_actions": ["Do not change dependencies"],
     "acceptance_criteria": ["Observable passing condition"],
-    "test_commands": ["python3 -m unittest discover -s tests -v"],
+    "test_commands": ["python3 -m unittest discover -s tests -t . -v"],
     "risk": {
       "file_count": 2,
       "line_count": 80,

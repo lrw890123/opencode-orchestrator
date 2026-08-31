@@ -47,7 +47,7 @@ When the user explicitly asks to continue the same approved task after a local i
 
 MCP tool cancellation and `cancel_wait` stop only the local wait. OpenCode keeps running and the same task can later be resumed. Only an explicit `abort_task` call aborts the OpenCode session. Never turn cancellation into abort.
 
-Single-tool cancellation is not a production capability in 2.1.4: the disposable experiment records `production_supported=false`. The public surface remains exactly eight tools; `kind=continue` reuses `reply_and_wait`, and recovery otherwise uses a permission reply, `resume_wait`, or explicit `abort_task`.
+Single-tool cancellation is not a production capability in 2.1.5: the disposable experiment records `production_supported=false`. The public surface remains exactly eight tools; `kind=continue` reuses `reply_and_wait`, and recovery otherwise uses a permission reply, `resume_wait`, or explicit `abort_task`.
 
 The external `bin/oc-control` command can show status, cancel a pending wait, or explicitly abort a task. It never deletes task data or worktrees.
 

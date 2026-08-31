@@ -212,6 +212,24 @@ class ToolServiceTest(unittest.TestCase):
         self.assertEqual(result["outcome"], "STALLED")
         self.assertEqual(result["next_action"], "inspect_stall")
 
+    def test_projected_external_completion_requires_reacquire_before_review(self):
+        tool_service, bridge = self.make_service()
+        bridge.state.update(
+            {
+                "execution_state": "COMPLETED",
+                "phase": "COLLECTING",
+                "review_state": "READY",
+                "requires_reacquire": True,
+            }
+        )
+
+        result = tool_service.call(
+            "task_status", {"task_id": TASK_ID}, "req-reacquire"
+        )
+
+        self.assertEqual(result["outcome"], "COMPLETED")
+        self.assertEqual(result["next_action"], "resume_wait")
+
     def test_delegate_normalizes_and_round_trips_explicit_policy_contracts(self):
         tool_service, bridge = self.make_service()
         permission_policy = {

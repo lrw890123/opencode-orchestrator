@@ -12,6 +12,15 @@ from dataclasses import dataclass
 import fnmatch
 import shlex
 
+from .contracts import (
+    INPUT_PROBE_MAX_SECONDS,
+    INPUT_PROBE_MIN_SECONDS,
+    STALL_TIMEOUT_MAX_SECONDS,
+    STALL_TIMEOUT_MIN_SECONDS,
+    default_permission_policy,
+    default_progress_policy,
+)
+
 
 KNOWN_PERMISSIONS = frozenset(
     {
@@ -127,8 +136,9 @@ def normalize_permission_policy(value: object | None) -> dict:
     if unknown:
         raise ValueError(f"permission_policy has unknown keys: {', '.join(unknown)}")
 
-    default = raw.get("default", "allow")
-    persistence = raw.get("persistence", "task")
+    defaults = default_permission_policy()
+    default = raw.get("default", defaults["default"])
+    persistence = raw.get("persistence", defaults["persistence"])
     basis = raw.get("approval_basis")
     rules = raw.get("rules", [])
 
@@ -162,12 +172,15 @@ def normalize_permission_policy(value: object | None) -> dict:
             {"permission": permission, "pattern": pattern, "action": action}
         )
 
-    return {
-        "default": default,
-        "persistence": persistence,
-        "approval_basis": basis,
-        "rules": normalized_rules,
-    }
+    defaults.update(
+        {
+            "default": default,
+            "persistence": persistence,
+            "approval_basis": basis,
+            "rules": normalized_rules,
+        }
+    )
+    return defaults
 
 
 def normalize_progress_policy(value: object | None) -> dict:
@@ -177,13 +190,34 @@ def normalize_progress_policy(value: object | None) -> dict:
     if unknown:
         raise ValueError(f"progress_policy has unknown keys: {', '.join(unknown)}")
 
-    probe = raw.get("input_probe_interval_seconds", 15)
-    stall = raw.get("stall_timeout_seconds", 600)
-    if not isinstance(probe, int) or isinstance(probe, bool) or not 5 <= probe <= 300:
-        raise ValueError("input_probe_interval_seconds must be between 5 and 300")
-    if not isinstance(stall, int) or isinstance(stall, bool) or not 30 <= stall <= 86400:
-        raise ValueError("stall_timeout_seconds must be between 30 and 86400")
-    return {"input_probe_interval_seconds": probe, "stall_timeout_seconds": stall}
+    defaults = default_progress_policy()
+    probe = raw.get("input_probe_interval_seconds", defaults["input_probe_interval_seconds"])
+    stall = raw.get("stall_timeout_seconds", defaults["stall_timeout_seconds"])
+    if (
+        not isinstance(probe, int)
+        or isinstance(probe, bool)
+        or not INPUT_PROBE_MIN_SECONDS <= probe <= INPUT_PROBE_MAX_SECONDS
+    ):
+        raise ValueError(
+            f"input_probe_interval_seconds must be between "
+            f"{INPUT_PROBE_MIN_SECONDS} and {INPUT_PROBE_MAX_SECONDS}"
+        )
+    if (
+        not isinstance(stall, int)
+        or isinstance(stall, bool)
+        or not STALL_TIMEOUT_MIN_SECONDS <= stall <= STALL_TIMEOUT_MAX_SECONDS
+    ):
+        raise ValueError(
+            f"stall_timeout_seconds must be between "
+            f"{STALL_TIMEOUT_MIN_SECONDS} and {STALL_TIMEOUT_MAX_SECONDS}"
+        )
+    defaults.update(
+        {
+            "input_probe_interval_seconds": probe,
+            "stall_timeout_seconds": stall,
+        }
+    )
+    return defaults
 
 
 def _rule_matches(rule: dict, permission: str, targets: list[str]) -> bool:

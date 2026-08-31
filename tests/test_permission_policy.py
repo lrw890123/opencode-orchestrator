@@ -271,7 +271,7 @@ class PermissionPolicyTest(unittest.TestCase):
         for command in (
             "pytest -q tests/test_permission_policy.py",
             "python3 -m pytest -q tests/test_permission_policy.py::PermissionPolicyTest",
-            "python3 -m unittest discover -s tests -v",
+            "python3 -m unittest discover -s tests -t . -v",
             "python3 -m unittest tests.test_permission_policy -q",
         ):
             with self.subTest(command=command):
