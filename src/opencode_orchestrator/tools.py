@@ -267,6 +267,13 @@ TOOL_DEFINITIONS = (
                                 "and target pattern approved by the user."
                             ),
                         },
+                        "remember_for_task": {
+                            "type": "boolean",
+                            "description": (
+                                "With response=once and explicit approval, remember the exact "
+                                "live permission patterns only for this orchestrator task."
+                            ),
+                        },
                     },
                     "additionalProperties": False,
                 },

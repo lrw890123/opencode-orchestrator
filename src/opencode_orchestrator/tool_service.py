@@ -89,12 +89,16 @@ class ToolService:
         message = str(error)
         if "current pending permission" in message:
             return "permission request is no longer pending; refresh task status before replying"
+        if "current pending question" in message:
+            return "question request is no longer pending; refresh task status before replying"
         if message.startswith("high-risk permission reply requires"):
             return (
                 "sensitive permission approval requires user_approved=true and an "
                 "action-specific approval_basis naming the permission and target"
             )
         if message.startswith("cannot continue"):
+            return message
+        if message.startswith("task-local permission rules require"):
             return message
         if message.startswith("cannot answer ") or message in {
             "maximum review rounds exceeded",
@@ -267,7 +271,13 @@ class ToolService:
             self._keys(payload, required={"text"}, allowed={"text"}, label="payload")
             self._nonblank(payload["text"], "payload.text")
         elif kind == "permission":
-            allowed = {"request_id", "response", "user_approved", "approval_basis"}
+            allowed = {
+                "request_id",
+                "response",
+                "user_approved",
+                "approval_basis",
+                "remember_for_task",
+            }
             self._keys(
                 payload,
                 required={"request_id", "response"},
@@ -281,9 +291,24 @@ class ToolService:
                 self._boolean(payload["user_approved"], "payload.user_approved")
             if "approval_basis" in payload:
                 self._nonblank(payload["approval_basis"], "payload.approval_basis")
+            if "remember_for_task" in payload:
+                self._boolean(
+                    payload["remember_for_task"],
+                    "payload.remember_for_task",
+                )
             if payload["response"] == "always":
                 if payload.get("user_approved") is not True:
                     raise ToolInputError("always permission requires payload.user_approved=true")
+                self._nonblank(payload.get("approval_basis"), "payload.approval_basis")
+            if payload.get("remember_for_task") is True:
+                if payload["response"] != "once":
+                    raise ToolInputError(
+                        "payload.remember_for_task requires payload.response=once"
+                    )
+                if payload.get("user_approved") is not True:
+                    raise ToolInputError(
+                        "payload.remember_for_task requires payload.user_approved=true"
+                    )
                 self._nonblank(payload.get("approval_basis"), "payload.approval_basis")
         elif kind == "question":
             self._keys(

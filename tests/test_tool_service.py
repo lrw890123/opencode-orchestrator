@@ -167,6 +167,10 @@ class ToolServiceTest(unittest.TestCase):
             definitions["reply_and_wait"]["inputSchema"]["properties"]["kind"]["enum"],
             ["review", "continue", "permission", "question"],
         )
+        permission_payload = definitions["reply_and_wait"]["inputSchema"]["properties"][
+            "payload"
+        ]["properties"]
+        self.assertIn("remember_for_task", permission_payload)
 
     def test_delegate_schema_exposes_optional_policy_contracts(self):
         definition = next(tool for tool in self.definitions() if tool["name"] == "delegate_and_wait")
@@ -299,6 +303,19 @@ class ToolServiceTest(unittest.TestCase):
             "req-safe-permission",
         )
         self.assertEqual(bridge.reply_calls[0][2], {"request_id": "per-safe", "response": "once"})
+        remembered = {
+            "request_id": "per-external",
+            "response": "once",
+            "user_approved": True,
+            "approval_basis": "Approve external_directory /tmp/* for this task.",
+            "remember_for_task": True,
+        }
+        tool_service.call(
+            "reply_and_wait",
+            {"task_id": TASK_ID, "kind": "permission", "payload": remembered},
+            "req-remembered-permission",
+        )
+        self.assertEqual(bridge.reply_calls[1][2], remembered)
 
         for payload in (
             {
@@ -312,6 +329,26 @@ class ToolServiceTest(unittest.TestCase):
                 "response": "once",
                 "user_approved": True,
                 "approval_basis": "   ",
+            },
+            {
+                "request_id": "per-risky",
+                "response": "once",
+                "user_approved": True,
+                "approval_basis": "Approve external_directory /tmp/*.",
+                "remember_for_task": "yes",
+            },
+            {
+                "request_id": "per-risky",
+                "response": "always",
+                "user_approved": True,
+                "approval_basis": "Approve external_directory /tmp/*.",
+                "remember_for_task": True,
+            },
+            {
+                "request_id": "per-risky",
+                "response": "once",
+                "approval_basis": "Approve external_directory /tmp/*.",
+                "remember_for_task": True,
             },
         ):
             with self.subTest(payload=payload), self.assertRaises(ToolInputError):

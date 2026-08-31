@@ -18,6 +18,10 @@ The optional `permission_policy` defaults to `default=allow` with `persistence=t
 
 Pending permissions/questions are reconciled across both OpenCode discovery APIs and deduplicated by request/session. Never infer that input disappeared from only one empty API response. A pending tool linked by permission `call_id` is reported as `waiting_permission`, which means the command has not started even if OpenCode's raw tool part says `running`.
 
+If the user directly continues the same OpenCode session after the task was recorded as `COMPLETED` or `ABORTED`, `task_status` may project live `RUNNING` or `INPUT_REQUIRED` state without mutating the record. Reacquire it only through `resume_wait` or an exact still-pending permission/question reply. Those lease-owned operations preserve the task/session/worktree and invalidate stale review state. An earlier abort is marked `SUPERSEDED` only after new live activity is detected; idle sessions, heartbeats, and stale tool records do not reopen it.
+
+For a manually approved permission, `remember_for_task=true` may accompany `response=once`, `user_approved=true`, and an action-specific `approval_basis`. It stores only the exact permission and patterns from the live request as task-local rules. It must never accept a caller-supplied broader pattern or override a deny or non-bypassable safety gate.
+
 The optional `progress_policy` defaults to a 15-second input probe and a 600-second stall timeout. Probes are local MCP work inside the existing SSE wait, invoke no model, and **不消耗 Codex token**. Do not use `task_status` polling as a progress mechanism.
 
 When the Codex client supplies an MCP `progressToken`, the pending tool card receives throttled `notifications/progress` summaries for connection, analysis/editing, safe tool names, worktree updates, and input waits. These notifications expose no reasoning text, command arguments, file content, or tool output; they do not wake the Codex model or add polling.
@@ -32,7 +36,7 @@ If multiple tasks are active, identify them by task ID and ask the user which on
 | `INPUT_REQUIRED` | Answer only when the contract and risk policy make the answer unambiguous. Use `reply_and_wait`; otherwise ask the user. |
 | `INTERRUPTED` or `WAIT_CANCELLED` | Use `resume_wait` with the same task ID. Never create a replacement session or resend the initial task. |
 | `FAILED` | Preserve the task and worktree, read the failure/transcript as needed, and diagnose before proposing a retry. |
-| `ABORTED` | Report the partial state; do not restart without a new user decision. |
+| `ABORTED` | Report the partial state. Reattach only if the user directly started new live activity in the same session and explicitly asks to resume or answer its pending input. |
 | `STALLED` | Inspect diagnostics, surface pending input, or resume the same task after progress. Do not abort or create a replacement session. |
 
 Use `task_status` for a single diagnostic snapshot, not periodic monitoring. Use `read_transcript` only when the user asks to see the interaction or when specific execution evidence is needed; tool output bodies remain opt-in.
@@ -43,7 +47,7 @@ When the user explicitly asks to continue the same approved task after a local i
 
 MCP tool cancellation and `cancel_wait` stop only the local wait. OpenCode keeps running and the same task can later be resumed. Only an explicit `abort_task` call aborts the OpenCode session. Never turn cancellation into abort.
 
-Single-tool cancellation is not a production capability in 2.1.3: the disposable experiment records `production_supported=false`. The public surface remains exactly eight tools; `kind=continue` reuses `reply_and_wait`, and recovery otherwise uses a permission reply, `resume_wait`, or explicit `abort_task`.
+Single-tool cancellation is not a production capability in 2.1.4: the disposable experiment records `production_supported=false`. The public surface remains exactly eight tools; `kind=continue` reuses `reply_and_wait`, and recovery otherwise uses a permission reply, `resume_wait`, or explicit `abort_task`.
 
 The external `bin/oc-control` command can show status, cancel a pending wait, or explicitly abort a task. It never deletes task data or worktrees.
 

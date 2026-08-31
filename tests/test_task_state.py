@@ -28,6 +28,7 @@ class TaskStoreTest(unittest.TestCase):
             self.assertEqual(state["progress"]["last_progress_event"], "task.created")
             self.assertEqual(state["progress"]["heartbeat_count"], 0)
             self.assertEqual(state["permission_audit"], [])
+            self.assertEqual(state["task_permission_rules"], [])
             self.assertEqual(state["execution"]["continuation_round"], 0)
             self.assertIsNone(state["execution"]["continuation"])
 

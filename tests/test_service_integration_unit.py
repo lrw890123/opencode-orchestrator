@@ -297,6 +297,23 @@ class ContinueOrderingClient(FakeClient):
         return super().prompt_async(*args, **kwargs)
 
 
+class ExternalResumeClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.external_busy = False
+
+    def session_status(self, session_id):
+        return {"type": "busy"} if self.external_busy else None
+
+    def event_response(self):
+        lines = event({"type": "server.connected", "properties": {}})
+        self.external_busy = False
+        lines += event(
+            {"type": "session.idle", "properties": {"sessionID": self.session_id}}
+        )
+        return FakeResponse(lines)
+
+
 class AcceptedContinuationUncertainClient(ContinueOrderingClient):
     def prompt_async(self, session_id, text, **kwargs):
         super().prompt_async(session_id, text, **kwargs)
@@ -434,6 +451,16 @@ class BridgeServiceTest(unittest.TestCase):
             current["opencode"]["dispatch_state"] = "SENT"
 
         service.store.update(prepared["task_id"], prime)
+        return prepared
+
+    def _prime_reviewing_task(self, service, source, request=None):
+        prepared = service.prepare_task(
+            source,
+            "reviewing-external-resume",
+            deepcopy(request or LOW_REQUEST),
+        )
+        service.dispatch(prepared["task_id"], timeout_seconds=2)
+        service.collect_result(prepared["task_id"])
         return prepared
 
     def test_continue_sends_after_listener_and_reuses_model_effort_and_session(self):
@@ -782,6 +809,225 @@ class BridgeServiceTest(unittest.TestCase):
             self.assertEqual(client.last_prompt["session_id"], "ses_fake_new")
             self.assertEqual(service.status(prepared["task_id"])["phase"], Phase.COLLECTING)
 
+    def test_status_projects_external_permission_without_mutating_completed_state(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = FakeClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            client.scenario = "idle_busy"
+            client._pending_permissions = [
+                {
+                    "id": "per-external-turn",
+                    "sessionID": client.session_id,
+                    "action": "external_directory",
+                    "resources": ["/tmp/*"],
+                    "source": {"callID": "call-external-turn"},
+                }
+            ]
+
+            projected = service.status(prepared["task_id"])
+            persisted = service.store.load(prepared["task_id"])
+
+            self.assertEqual(projected["execution_state"], "INPUT_REQUIRED")
+            self.assertEqual(projected["phase"], Phase.PERMISSION_WAIT)
+            self.assertEqual(projected["review_state"], "REVISION_REQUESTED")
+            self.assertTrue(projected["progress"]["external_activity_detected"])
+            self.assertEqual(
+                projected["progress"]["pending_permissions"][0]["request_id"],
+                "per-external-turn",
+            )
+            self.assertEqual(persisted["execution_state"], "COMPLETED")
+            self.assertEqual(persisted["phase"], Phase.REVIEWING)
+
+    def test_completed_task_can_reply_to_live_permission_and_remember_exact_task_rule(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = FakeClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            client._pending_permissions = [
+                {
+                    "id": "per-external-turn",
+                    "sessionID": client.session_id,
+                    "action": "external_directory",
+                    "resources": ["/tmp/*"],
+                }
+            ]
+
+            result = service.reply(
+                prepared["task_id"],
+                "permission",
+                {
+                    "request_id": "per-external-turn",
+                    "response": "once",
+                    "user_approved": True,
+                    "approval_basis": "Approve external_directory /tmp/* for this task.",
+                    "remember_for_task": True,
+                },
+                timeout_seconds=2,
+            )
+            state = service.store.load(prepared["task_id"])
+
+            self.assertEqual(result["outcome"], "idle")
+            self.assertEqual(result["phase"], Phase.COLLECTING)
+            self.assertEqual(result["session_id"], client.session_id)
+            self.assertEqual(client.created_session_count, 1)
+            self.assertEqual(client.prompt_count, 1)
+            self.assertEqual(
+                client.permission_replies,
+                [(client.session_id, "per-external-turn", "once")],
+            )
+            self.assertEqual(
+                state["task_permission_rules"],
+                [
+                    {
+                        "permission": "external_directory",
+                        "pattern": "/tmp/*",
+                        "action": "allow",
+                    }
+                ],
+            )
+            self.assertEqual(state["execution"]["external_reentry_count"], 1)
+            self.assertIn("review_invalidated_at", state["execution"])
+
+            client._pending_permissions = [
+                {
+                    "id": "per-external-turn-2",
+                    "sessionID": client.session_id,
+                    "action": "external_directory",
+                    "resources": ["/tmp/*"],
+                }
+            ]
+            reconciled = service._reconcile_pending_inputs(
+                prepared["task_id"],
+                client,
+                client.session_id,
+            )
+            self.assertIsNone(reconciled.outcome)
+            self.assertEqual(
+                client.permission_replies[-1],
+                (client.session_id, "per-external-turn-2", "once"),
+            )
+
+            def deny_exact_pattern(current):
+                policy = deepcopy(current["permission_policy"])
+                policy["rules"] = [
+                    {
+                        "permission": "external_directory",
+                        "pattern": "/tmp/*",
+                        "action": "deny",
+                    }
+                ]
+                current["permission_policy"] = policy
+
+            service.store.update(prepared["task_id"], deny_exact_pattern)
+            client._pending_permissions = [
+                {
+                    "id": "per-external-turn-3",
+                    "sessionID": client.session_id,
+                    "action": "external_directory",
+                    "resources": ["/tmp/*"],
+                }
+            ]
+            service._reconcile_pending_inputs(
+                prepared["task_id"],
+                client,
+                client.session_id,
+            )
+            self.assertEqual(
+                client.permission_replies[-1],
+                (client.session_id, "per-external-turn-3", "reject"),
+            )
+
+    def test_completed_task_can_reply_to_live_question_from_external_turn(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = FakeClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            client._pending_questions = [
+                {
+                    "id": "que-external-turn",
+                    "sessionID": client.session_id,
+                    "questions": [
+                        {"header": "Choice", "question": "Continue the same task?"}
+                    ],
+                }
+            ]
+
+            result = service.reply(
+                prepared["task_id"],
+                "question",
+                {
+                    "request_id": "que-external-turn",
+                    "answers": [["Continue"]],
+                },
+                timeout_seconds=2,
+            )
+
+            self.assertEqual(result["outcome"], "idle")
+            self.assertEqual(result["phase"], Phase.COLLECTING)
+            self.assertEqual(
+                client.question_replies,
+                [("que-external-turn", [["Continue"]])],
+            )
+            self.assertEqual(client.created_session_count, 1)
+            self.assertEqual(client.prompt_count, 1)
+
+    def test_resume_reopens_completed_task_only_when_live_session_changed(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = ExternalResumeClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+
+            unchanged = service.wait(prepared["task_id"], timeout_seconds=2)
+            self.assertEqual(unchanged["reason"], "current-state")
+            self.assertEqual(unchanged["phase"], Phase.REVIEWING)
+
+            client.external_busy = True
+            projected = service.status(prepared["task_id"])
+            self.assertEqual(projected["execution_state"], "RUNNING")
+            resumed = service.wait(prepared["task_id"], timeout_seconds=2)
+            state = service.store.load(prepared["task_id"])
+
+            self.assertEqual(resumed["outcome"], "idle")
+            self.assertEqual(resumed["phase"], Phase.COLLECTING)
+            self.assertEqual(state["execution"]["external_reentry_count"], 1)
+            self.assertEqual(client.created_session_count, 1)
+            self.assertEqual(client.prompt_count, 1)
+
+    def test_resume_reopens_aborted_task_after_new_live_session_activity(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = ExternalResumeClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            service.abort_task(prepared["task_id"])
+            client.external_busy = True
+
+            projected = service.status(prepared["task_id"])
+            persisted = service.store.load(prepared["task_id"])
+            self.assertEqual(projected["execution_state"], "RUNNING")
+            self.assertEqual(persisted["execution_state"], "ABORTED")
+            self.assertEqual(persisted["phase"], Phase.CANCELLED)
+
+            resumed = service.wait(prepared["task_id"], timeout_seconds=2)
+            state = service.store.load(prepared["task_id"])
+
+            self.assertEqual(resumed["outcome"], "idle")
+            self.assertEqual(resumed["phase"], Phase.COLLECTING)
+            self.assertEqual(state["abort"]["state"], "SUPERSEDED")
+            self.assertEqual(
+                state["abort"]["superseded_by"],
+                "external-session-activity",
+            )
+            self.assertEqual(state["execution"]["external_reentry_count"], 1)
+            self.assertEqual(client.created_session_count, 1)
+            self.assertEqual(client.prompt_count, 1)
+            self.assertEqual(client.abort_count, 1)
+
     def test_large_unapproved_task_stops_before_worktree_creation(self):
         with TemporaryDirectory() as tmp:
             source = create_repo(Path(tmp) / "source")
@@ -992,6 +1238,25 @@ class BridgeServiceTest(unittest.TestCase):
             self.assertEqual(client.created_session_count, 1)
             self.assertEqual(state["permission_audit"], [])
             self.assertNotIn("native-secret", json.dumps(result))
+
+            replied = service.reply(
+                prepared["task_id"],
+                "permission",
+                {
+                    "request_id": "per_native_external",
+                    "response": "once",
+                    "user_approved": True,
+                    "approval_basis": (
+                        "Approve external_directory /external/reference/* once."
+                    ),
+                },
+                timeout_seconds=2,
+            )
+            self.assertEqual(replied["outcome"], "idle")
+            self.assertEqual(
+                client.permission_replies,
+                [("ses_fake_new", "per_native_external", "once")],
+            )
 
     def test_native_p2_is_not_discarded_when_api_reconciliation_contains_p1(self):
         with TemporaryDirectory() as tmp:

@@ -25,7 +25,7 @@ class CliTest(unittest.TestCase):
         finally:
             sys.path.remove(str(source_root))
 
-        self.assertEqual(module.__version__, "2.1.3")
+        self.assertEqual(module.__version__, "2.1.4")
 
     def test_version_prints_one_json_object(self):
         completed = subprocess.run(

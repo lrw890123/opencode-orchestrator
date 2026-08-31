@@ -271,6 +271,7 @@ class MigrationTest(unittest.TestCase):
             {"input_probe_interval_seconds": 15, "stall_timeout_seconds": 900},
         )
         self.assertEqual(migrated["permission_audit"], [])
+        self.assertEqual(migrated["task_permission_rules"], [])
         self.assertEqual(
             migrated["progress"]["last_progress_at"],
             "2026-08-29T01:03:00+00:00",

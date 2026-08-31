@@ -2,7 +2,7 @@
 
 这是一个本地 Codex Plugin：Codex 负责方案、风险判断和 Review，OpenCode 在隔离 worktree 中执行已批准的编码任务。等待期间由本地 MCP 进程监听 OpenCode SSE；不会周期性唤醒模型，也不需要 Codex 轮询。OpenCode 完成、提问或失败后，pending 工具返回，原 Codex 对话的同一回合继续。
 
-Plugin 2.1.3 同时包含：自然语言 Skill、8 个 MCP 工具、本地控制 socket、状态迁移、工具卡进度通知和可回滚安装器。MCP 输出使用 `schema_version: 3`；默认 OpenCode 地址是 `http://127.0.0.1:4096`，默认 effort 是 `max`。
+Plugin 2.1.4 同时包含：自然语言 Skill、8 个 MCP 工具、本地控制 socket、状态迁移、工具卡进度通知和可回滚安装器。MCP 输出使用 `schema_version: 3`；默认 OpenCode 地址是 `http://127.0.0.1:4096`，默认 effort 是 `max`。
 
 项目只使用 Python 标准库，没有运行时第三方依赖。版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -54,13 +54,17 @@ python3 scripts/install_plugin.py activate \
 
 `external_directory` 是不可绕过的安全门：只有显式的绝对路径规则（例如 `/absolute/reference/**`）才能自动允许访问。未声明的外部目录、未知权限、目标不确定或高风险动作会返回 `INPUT_REQUIRED`，不会因为自然语言描述而自动放行。此时若用户明确批准 `once` 或 `always`，`reply_and_wait` 必须同时提交 `user_approved=true`，以及明确写出 permission 名称和目标 pattern 的 action-specific `approval_basis`；`reject` 不需要批准证据。
 
-2.1.3 会合并 OpenCode session-scoped 与 legacy pending-input 接口并按 request/session 去重；任一接口仍有请求时都不会把它清空。与 permission `call_id` 关联的工具会显示为 `waiting_permission`，不再把尚未开始执行的命令误报成普通 `running`。
+2.1.4 会合并 OpenCode session-scoped 与 legacy pending-input 接口并按 request/session 去重；任一接口仍有请求时都不会把它清空。与 permission `call_id` 关联的工具会显示为 `waiting_permission`，不再把尚未开始执行的命令误报成普通 `running`。
+
+如果用户在 OpenCode 窗口中直接续写一个已被编排器记为 `COMPLETED` 或 `ABORTED` 的原 session，`task_status` 会以只读方式展示实时推导的 `RUNNING` 或 `INPUT_REQUIRED`，但不会偷偷改写任务记录。随后显式调用 `resume_wait`，或者针对同一 session 当前仍 pending 的精确 request ID 调用 `reply_and_wait`，才会在 WaitLease 下持久化重新接管；task ID、session、worktree、模型和 effort 均保持不变。旧 abort 会保留审计信息并标记为 `SUPERSEDED`，idle、旧心跳或陈旧工具记录不会复活任务。
+
+权限回复可选传入 `remember_for_task=true`。它只允许与 `response=once`、`user_approved=true` 和包含 permission 及精确目标 pattern 的 `approval_basis` 一起使用；编排器从当前 live request 生成 task-local allow rule，不接受调用方另传更宽 pattern，也不会覆盖 deny 或非绕过安全门。
 
 MCP 进程在现有 SSE 连接内执行本地 pending-input probe 与进度诊断；这些 probe 不调用模型，**不消耗 Codex token**。不要轮询 `task_status`，也不要用 shell 循环等待。`server.heartbeat` 只代表传输活动；长时间没有 meaningful progress 时结果为 `STALLED`，此时检查诊断、处理 pending input，或在进度恢复后对同一 task 调用 `resume_wait`。进入 `STALLED` 不会 abort、删除 worktree 或创建新 session；恢复始终复用同一 task/session/worktree（resume the same task/session/worktree）。
 
 当 Codex 客户端为 MCP 调用提供 `progressToken` 时，等待工具会通过标准 `notifications/progress` 在工具卡中显示节流后的执行摘要。摘要只包含连接、分析/编辑、工具名称、工作树更新和等待输入等状态；不包含推理文本、命令参数、文件内容或工具输出。通知由本地 MCP 进程发送，不会唤醒 Codex 模型，也不会产生额外的状态轮询。
 
-2.1.3 对外固定暴露 exactly eight public tools：`delegate_and_wait`、`reply_and_wait`、`resume_wait`、`task_status`、`read_transcript`、`collect_result`、`cancel_wait` 和 `abort_task`。`kind=continue` 复用 `reply_and_wait`，没有新增冗余工具；只允许 PAUSED + idle + 无 pending input/tool 的原任务，并通过 continuation marker 对不确定发送进行无重发恢复。单工具取消实验的结论是 `production_supported=false`，因此本版本不提供 `cancel_tool_call`；只有显式 `abort_task` 才改变 OpenCode 执行状态。
+2.1.4 对外固定暴露 exactly eight public tools：`delegate_and_wait`、`reply_and_wait`、`resume_wait`、`task_status`、`read_transcript`、`collect_result`、`cancel_wait` 和 `abort_task`。`kind=continue` 复用 `reply_and_wait`，没有新增冗余工具；只允许 PAUSED + idle + 无 pending input/tool 的原任务，并通过 continuation marker 对不确定发送进行无重发恢复。单工具取消实验的结论是 `production_supported=false`，因此本版本不提供 `cancel_tool_call`；只有显式 `abort_task` 才主动中止 OpenCode，之后由用户直接在原 session 开启的新 turn 仍可按上述实时证据重新接管。
 
 ## Review 边界
 

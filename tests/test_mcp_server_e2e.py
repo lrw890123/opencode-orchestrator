@@ -214,6 +214,164 @@ class MCPServerE2ETest(unittest.TestCase):
             finally:
                 client.close()
 
+    def test_external_turn_reacquires_completed_and_aborted_task_over_public_tools(self):
+        with TemporaryDirectory() as tmp, FakeOpenCodeServer("idle") as server:
+            root = Path(tmp)
+            state_root = root / "state"
+            source = create_repo(root / "source")
+            client = self.start_client(state_root)
+            try:
+                initial = client.request(self.delegate_call(40, source, server), timeout=5)
+                self.assertEqual(
+                    initial["result"]["structuredContent"]["outcome"],
+                    "COMPLETED",
+                )
+                task_id = self.only_task_id(state_root)
+                store = TaskStore(state_root)
+                session_id = store.load(task_id)["opencode"]["session_id"]
+                session = server.sessions[session_id]
+
+                client.request(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 41,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "collect_result",
+                            "arguments": {"task_id": task_id},
+                        },
+                    },
+                    timeout=5,
+                )
+                with server.condition:
+                    session.busy = True
+                    session.pending_permissions = [
+                        {
+                            "id": "per-external-turn",
+                            "sessionID": session_id,
+                            "action": "external_directory",
+                            "resources": ["/tmp/*"],
+                        }
+                    ]
+                    server.activity += 1
+                    server.condition.notify_all()
+
+                status = client.request(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 42,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "task_status",
+                            "arguments": {"task_id": task_id},
+                        },
+                    },
+                    timeout=5,
+                )["result"]["structuredContent"]
+                self.assertEqual(status["execution_state"], "INPUT_REQUIRED")
+                self.assertEqual(
+                    status["artifacts"]["state"]["phase"],
+                    "PERMISSION_WAIT",
+                )
+
+                replied = client.request(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 43,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "reply_and_wait",
+                            "arguments": {
+                                "task_id": task_id,
+                                "kind": "permission",
+                                "payload": {
+                                    "request_id": "per-external-turn",
+                                    "response": "once",
+                                    "user_approved": True,
+                                    "approval_basis": (
+                                        "Approve external_directory /tmp/* for this task."
+                                    ),
+                                    "remember_for_task": True,
+                                },
+                                "timeout_seconds": 5,
+                            },
+                        },
+                    },
+                    timeout=7,
+                )["result"]["structuredContent"]
+                self.assertEqual(replied["outcome"], "COMPLETED")
+                self.assertEqual(
+                    session.permission_replies[-1],
+                    {"request_id": "per-external-turn", "body": {"reply": "once"}},
+                )
+                self.assertEqual(
+                    store.load(task_id)["task_permission_rules"],
+                    [
+                        {
+                            "permission": "external_directory",
+                            "pattern": "/tmp/*",
+                            "action": "allow",
+                        }
+                    ],
+                )
+
+                aborted = client.request(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 44,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "abort_task",
+                            "arguments": {"task_id": task_id},
+                        },
+                    },
+                    timeout=5,
+                )["result"]["structuredContent"]
+                self.assertEqual(aborted["outcome"], "ABORTED")
+                with server.condition:
+                    session.busy = True
+                    server.activity += 1
+                    server.condition.notify_all()
+
+                aborted_status = client.request(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 45,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "task_status",
+                            "arguments": {"task_id": task_id},
+                        },
+                    },
+                    timeout=5,
+                )["result"]["structuredContent"]
+                self.assertEqual(aborted_status["execution_state"], "RUNNING")
+
+                resumed = client.request(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 46,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "resume_wait",
+                            "arguments": {
+                                "task_id": task_id,
+                                "timeout_seconds": 5,
+                            },
+                        },
+                    },
+                    timeout=7,
+                )["result"]["structuredContent"]
+                final_state = store.load(task_id)
+
+                self.assertEqual(resumed["outcome"], "COMPLETED")
+                self.assertEqual(final_state["abort"]["state"], "SUPERSEDED")
+                self.assertEqual(final_state["opencode"]["session_id"], session_id)
+                self.assertEqual(server.created_session_count, 1)
+                self.assertEqual(server.prompt_count, 1)
+            finally:
+                client.close()
+
     def test_external_cancel_returns_wait_cancelled_without_aborting(self):
         with TemporaryDirectory() as tmp, FakeOpenCodeServer("blocking") as server:
             root = Path(tmp)

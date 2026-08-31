@@ -2,6 +2,17 @@
 
 All notable changes to OpenCode Orchestrator are documented here.
 
+## 2.1.4
+
+- Detect direct user continuations in an existing OpenCode session after the
+  orchestrator recorded `COMPLETED` or `ABORTED`.
+- Project live `RUNNING`/`INPUT_REQUIRED` state from `task_status` without
+  making the read-only status tool mutate task records.
+- Let `resume_wait` and exact live permission/question replies reacquire the
+  original task, session, and worktree under the existing wait lease.
+- Optionally remember explicitly approved live permission patterns as exact
+  task-local rules; these rules never override a policy denial.
+
 ## 2.1.3
 
 - Continue an eligible paused OpenCode session through the existing `reply_and_wait` tool.

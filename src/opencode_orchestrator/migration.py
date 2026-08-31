@@ -322,6 +322,10 @@ def migrate_task_record(
         migrated.get("permission_audit"), list
     ):
         migrated["permission_audit"] = []
+    if "task_permission_rules" not in migrated or not isinstance(
+        migrated.get("task_permission_rules"), list
+    ):
+        migrated["task_permission_rules"] = []
 
     progress = migrated.get("progress")
     if not isinstance(progress, dict):

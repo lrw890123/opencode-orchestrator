@@ -195,6 +195,7 @@ class TaskStore:
                 "stall_timeout_seconds": 600,
             },
             "permission_audit": [],
+            "task_permission_rules": [],
             "progress": {
                 "last_progress_at": now,
                 "last_progress_event": "task.created",

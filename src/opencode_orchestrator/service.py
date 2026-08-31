@@ -544,11 +544,15 @@ class BridgeService:
 
         state = self.store.load(task_id)
         request = self._request(task_id)
-        policy = state.get("permission_policy") or request.get("permission_policy")
         contract = request if isinstance(request, dict) else {}
         worktree = (state.get("worktree") or {}).get("path")
         try:
-            decision = evaluate_permission(policy, permission, contract, worktree)
+            decision = self._permission_decision(
+                state,
+                permission,
+                contract,
+                worktree,
+            )
         except Exception:
             decision = None
         if decision is None or decision.action == "ask" or decision.response is None:
@@ -643,13 +647,6 @@ class BridgeService:
     ) -> tuple[dict, object]:
         """Resolve and re-evaluate the exact permission currently shown."""
 
-        state = self.store.load(task_id)
-        last_event = (state.get("execution") or {}).get("last_event")
-        properties = last_event.get("properties") if isinstance(last_event, dict) else None
-        current_id = properties.get("id") if isinstance(properties, dict) else None
-        if current_id != request_id:
-            raise ValueError("request_id does not match the current pending permission")
-
         raw_permissions = self._pending_fetch(
             client,
             session_id,
@@ -664,9 +661,6 @@ class BridgeService:
                 raw, session_id
             )
             candidates.append(normalized)
-        persisted = (state.get("progress") or {}).get("pending_permissions")
-        if isinstance(persisted, list):
-            candidates.extend(item for item in persisted if isinstance(item, dict))
         permission = next(
             (
                 item
@@ -676,14 +670,150 @@ class BridgeService:
             ),
             None,
         )
+        state = self.store.load(task_id)
+        if permission is None:
+            last_event = (state.get("execution") or {}).get("last_event")
+            properties = (
+                last_event.get("properties")
+                if isinstance(last_event, dict)
+                else None
+            )
+            event_matches = (
+                isinstance(properties, dict)
+                and properties.get("id") == request_id
+                and properties.get("sessionID") == session_id
+            )
+            persisted = (state.get("progress") or {}).get("pending_permissions")
+            if event_matches and isinstance(persisted, list):
+                permission = next(
+                    (
+                        item
+                        for item in persisted
+                        if isinstance(item, dict)
+                        and item.get("request_id") == request_id
+                        and item.get("session_id") == session_id
+                    ),
+                    None,
+                )
         if permission is None:
             raise ValueError("request_id is not a current pending permission")
 
         request = self._request(task_id)
-        policy = state.get("permission_policy") or request.get("permission_policy")
         worktree = (state.get("worktree") or {}).get("path")
-        decision = evaluate_permission(policy, permission, request, worktree)
+        decision = self._permission_decision(
+            state,
+            permission,
+            request,
+            worktree,
+        )
         return permission, decision
+
+    def _current_question_for_reply(
+        self,
+        task_id: str,
+        client,
+        session_id: str,
+        request_id: str,
+    ) -> dict:
+        """Resolve the exact question that is still pending for this session."""
+
+        raw_questions = self._pending_fetch(
+            client,
+            session_id,
+            getattr(client, "pending_questions", lambda _session_id: []),
+            "question",
+            "/api/session/{sessionID}/question",
+            "/question",
+        )
+        for raw in raw_questions:
+            normalized, _event, _valid = self._required_question_projection(
+                raw,
+                session_id,
+            )
+            if normalized.get("request_id") == request_id:
+                return normalized
+        state = self.store.load(task_id)
+        last_event = (state.get("execution") or {}).get("last_event")
+        properties = (
+            last_event.get("properties") if isinstance(last_event, dict) else None
+        )
+        event_matches = (
+            isinstance(properties, dict)
+            and properties.get("id") == request_id
+            and properties.get("sessionID") == session_id
+        )
+        persisted = (state.get("progress") or {}).get("pending_questions")
+        if event_matches and isinstance(persisted, list):
+            for item in persisted:
+                if (
+                    isinstance(item, dict)
+                    and item.get("request_id") == request_id
+                    and item.get("session_id") == session_id
+                ):
+                    return item
+        raise ValueError("request_id is not a current pending question")
+
+    @staticmethod
+    def _task_rule_policy(state: dict) -> dict | None:
+        rules = state.get("task_permission_rules")
+        if not isinstance(rules, list) or not rules:
+            return None
+        return normalize_permission_policy(
+            {
+                "default": "ask",
+                "persistence": "task",
+                "rules": rules,
+            }
+        )
+
+    def _permission_decision(
+        self,
+        state: dict,
+        permission: dict,
+        request: dict,
+        worktree: str | None,
+    ):
+        policy = state.get("permission_policy") or request.get("permission_policy")
+        base_decision = evaluate_permission(policy, permission, request, worktree)
+        if base_decision.action == "deny":
+            return base_decision
+        task_policy = self._task_rule_policy(state)
+        if task_policy is not None:
+            task_decision = evaluate_permission(
+                task_policy,
+                permission,
+                request,
+                worktree,
+            )
+            if task_decision.action == "allow":
+                return task_decision
+        return base_decision
+
+    @staticmethod
+    def _remember_task_permission(current: dict, permission: dict) -> list[dict]:
+        existing = current.get("task_permission_rules")
+        rules = list(existing) if isinstance(existing, list) else []
+        candidates = [
+            {
+                "permission": permission["permission"],
+                "pattern": pattern,
+                "action": "allow",
+            }
+            for pattern in permission.get("patterns", [])
+        ]
+        normalized = normalize_permission_policy(
+            {
+                "default": "ask",
+                "persistence": "task",
+                "rules": [*rules, *candidates],
+            }
+        )["rules"]
+        deduplicated: list[dict] = []
+        for rule in normalized:
+            if rule not in deduplicated:
+                deduplicated.append(rule)
+        current["task_permission_rules"] = deduplicated
+        return candidates
 
     @staticmethod
     def _approval_is_action_specific(permission: dict, basis: object) -> bool:
@@ -697,7 +827,7 @@ class BridgeService:
             and action.casefold() in lowered
             and isinstance(targets, list)
             and bool(targets)
-            and any(
+            and all(
                 isinstance(target, str) and target.casefold() in lowered
                 for target in targets
             )
@@ -957,6 +1087,107 @@ class BridgeService:
 
             self.store.update(state["task_id"], persist_progress)
         return progress
+
+    def _terminal_live_projection(
+        self,
+        state: dict,
+        progress: dict,
+    ) -> tuple[str, str, str] | None:
+        """Derive a live state when a terminal session changed out of band."""
+
+        if state.get("execution_state") not in {
+            ExecutionState.COMPLETED.value,
+            ExecutionState.ABORTED.value,
+        }:
+            return None
+        if progress.get("diagnostic_error") is not None:
+            return None
+        if progress.get("pending_permissions"):
+            return (
+                ExecutionState.INPUT_REQUIRED.value,
+                Phase.PERMISSION_WAIT,
+                ReviewState.REVISION_REQUESTED.value,
+            )
+        if progress.get("pending_questions"):
+            return (
+                ExecutionState.INPUT_REQUIRED.value,
+                Phase.NEEDS_INPUT,
+                ReviewState.REVISION_REQUESTED.value,
+            )
+        persisted_progress = state.get("progress") or {}
+        newer_progress = self._timestamp_is_newer(
+            progress.get("last_progress_at"),
+            persisted_progress.get("last_progress_at"),
+        )
+        if progress.get("session_status") == "busy" or (
+            progress.get("pending_tools") and newer_progress
+        ):
+            return (
+                ExecutionState.RUNNING.value,
+                Phase.RUNNING,
+                ReviewState.REVISION_REQUESTED.value,
+            )
+        if newer_progress:
+            return (
+                ExecutionState.COMPLETED.value,
+                Phase.COLLECTING,
+                ReviewState.READY.value,
+            )
+        return None
+
+    def _project_live_state(self, state: dict, progress: dict) -> dict:
+        refreshed = deepcopy(state)
+        refreshed_progress = deepcopy(progress)
+        projection = self._terminal_live_projection(state, refreshed_progress)
+        refreshed_progress["external_activity_detected"] = projection is not None
+        refreshed["progress"] = refreshed_progress
+        if projection is not None:
+            (
+                refreshed["execution_state"],
+                refreshed["phase"],
+                refreshed["review_state"],
+            ) = projection
+        return refreshed
+
+    def _reopen_terminal_task(self, task_id: str, progress: dict | None = None) -> dict:
+        """Persist a lease-owned transition for externally resumed session work."""
+
+        detected_at = utc_now()
+
+        def reopen(current: dict) -> None:
+            if current.get("execution_state") not in {
+                ExecutionState.COMPLETED.value,
+                ExecutionState.ABORTED.value,
+            }:
+                return
+            abort = current.get("abort") or {}
+            if abort.get("state") in {"REQUESTED", "COMPLETED"}:
+                superseded_abort = dict(abort)
+                superseded_abort["state"] = "SUPERSEDED"
+                superseded_abort["superseded_at"] = detected_at
+                superseded_abort["superseded_by"] = "external-session-activity"
+                current["abort"] = superseded_abort
+            execution = dict(current.get("execution") or {})
+            execution["external_reentry_count"] = int(
+                execution.get("external_reentry_count", 0)
+            ) + 1
+            execution["external_reentry_at"] = detected_at
+            if current.get("review_state") in {
+                ReviewState.REVIEWING.value,
+                ReviewState.PASSED.value,
+                ReviewState.AWAITING_INTEGRATION.value,
+            }:
+                execution["review_invalidated_at"] = detected_at
+            current["execution"] = execution
+            current["execution_state"] = ExecutionState.RUNNING.value
+            current["phase"] = Phase.RUNNING
+            current["review_state"] = ReviewState.REVISION_REQUESTED.value
+            if progress is not None:
+                current_progress = deepcopy(progress)
+                current_progress["external_activity_detected"] = True
+                current["progress"] = current_progress
+
+        return self.store.update(task_id, reopen)
 
     def _preflight_wait(self, task_id: str, client, session_id: str) -> EventOutcome | None:
         """Reconcile pending input and decide whether SSE waiting may proceed."""
@@ -1702,15 +1933,19 @@ class BridgeService:
         if lease.task_id != task_id:
             raise ValueError("wait lease task_id does not match resumed task")
         state = self.store.load(task_id)
-        if state["execution_state"] in {
-            ExecutionState.COMPLETED.value,
-            ExecutionState.FAILED.value,
-            ExecutionState.ABORTED.value,
-        }:
+        if state["execution_state"] == ExecutionState.FAILED.value:
             return self._current_result(state)
         if (
             state["execution_state"] == ExecutionState.INPUT_REQUIRED.value
             and not state.get("opencode", {}).get("session_id")
+        ):
+            return self._current_result(state)
+        if state["execution_state"] in {
+            ExecutionState.COMPLETED.value,
+            ExecutionState.ABORTED.value,
+        } and (
+            state.get("opencode", {}).get("dispatch_state") != "SENT"
+            or not state.get("opencode", {}).get("session_id")
         ):
             return self._current_result(state)
         if state.get("opencode", {}).get("dispatch_state") != "SENT":
@@ -1719,6 +1954,20 @@ class BridgeService:
         if not session_id:
             raise ValueError("task has no OpenCode session to resume")
         client = self._client(state)
+
+        if state["execution_state"] in {
+            ExecutionState.COMPLETED.value,
+            ExecutionState.ABORTED.value,
+        }:
+            live_progress = self._progress_snapshot(
+                state,
+                client,
+                session_id,
+                persist=False,
+            )
+            if self._terminal_live_projection(state, live_progress) is None:
+                return self._current_result(state)
+            state = self._reopen_terminal_task(task_id, live_progress)
 
         continuation_error = self._reconcile_continuation_dispatch(
             task_id, client, session_id
@@ -1919,7 +2168,13 @@ class BridgeService:
                 self.store.update(task_id, mark_sent)
 
         elif kind == "permission":
-            if state["execution_state"] != ExecutionState.INPUT_REQUIRED.value:
+            if state["execution_state"] not in {
+                ExecutionState.INPUT_REQUIRED.value,
+                ExecutionState.RUNNING.value,
+                ExecutionState.STALLED.value,
+                ExecutionState.COMPLETED.value,
+                ExecutionState.ABORTED.value,
+            }:
                 raise ValueError(f"cannot answer permission in phase {state['phase']}")
             permission, decision = self._current_permission_for_reply(
                 task_id,
@@ -1941,6 +2196,27 @@ class BridgeService:
                     raise ValueError(
                         "high-risk permission reply requires an action-specific approval_basis"
                     )
+            if payload.get("remember_for_task") is True:
+                if decision.action == "deny":
+                    raise ValueError(
+                        "task-local permission rules cannot override a policy denial"
+                    )
+                if payload["response"] != "once":
+                    raise ValueError(
+                        "task-local permission rules require response=once"
+                    )
+                if payload.get("user_approved") is not True or not self._approval_is_action_specific(
+                    permission,
+                    payload.get("approval_basis"),
+                ):
+                    raise ValueError(
+                        "task-local permission rules require explicit action-specific approval"
+                    )
+            if state["execution_state"] in {
+                ExecutionState.COMPLETED.value,
+                ExecutionState.ABORTED.value,
+            }:
+                state = self._reopen_terminal_task(task_id)
 
             def send_reply() -> None:
                 success = client.reply_permission(
@@ -1956,6 +2232,7 @@ class BridgeService:
                     "reason": decision.reason,
                     "user_approved": payload.get("user_approved") is True,
                     "approval_basis": payload.get("approval_basis"),
+                    "remembered_for_task": payload.get("remember_for_task") is True,
                     "answered_at": utc_now(),
                 }
 
@@ -1972,6 +2249,8 @@ class BridgeService:
                     ):
                         existing.append(deepcopy(audit_entry))
                     current["permission_audit"] = existing
+                    if payload.get("remember_for_task") is True:
+                        self._remember_task_permission(current, permission)
                     current["execution_state"] = ExecutionState.RUNNING.value
                     current["phase"] = Phase.RUNNING
 
@@ -1981,8 +2260,25 @@ class BridgeService:
                 )
 
         elif kind == "question":
-            if state["execution_state"] != ExecutionState.INPUT_REQUIRED.value:
+            if state["execution_state"] not in {
+                ExecutionState.INPUT_REQUIRED.value,
+                ExecutionState.RUNNING.value,
+                ExecutionState.STALLED.value,
+                ExecutionState.COMPLETED.value,
+                ExecutionState.ABORTED.value,
+            }:
                 raise ValueError(f"cannot answer question in phase {state['phase']}")
+            self._current_question_for_reply(
+                task_id,
+                client,
+                session_id,
+                payload["request_id"],
+            )
+            if state["execution_state"] in {
+                ExecutionState.COMPLETED.value,
+                ExecutionState.ABORTED.value,
+            }:
+                state = self._reopen_terminal_task(task_id)
 
             def send_reply() -> None:
                 self.store.update(
@@ -2031,9 +2327,7 @@ class BridgeService:
         except Exception as error:
             progress = deepcopy(state.get("progress") or {})
             progress["diagnostic_error"] = self._safe_diagnostic(error)
-        refreshed = deepcopy(state)
-        refreshed["progress"] = progress
-        return refreshed
+        return self._project_live_state(state, progress)
 
     def read_transcript(
         self,
