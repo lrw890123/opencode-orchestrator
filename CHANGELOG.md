@@ -4,6 +4,17 @@ All notable changes to OpenCode Orchestrator are documented here.
 
 ## Unreleased
 
+## 2.1.6
+
+- Reconcile a running or stalled task to `COMPLETED` from durable transcript
+  evidence: when the transcript ends on a completed assistant turn with a
+  `step-finish` and no input is pending, `collect_result` adopts the finished
+  turn even if the session still reports `busy` and no `session.idle` ever
+  reached the orchestrator's event stream. This covers sessions driven from
+  another OpenCode process (shared storage, per-process event bus).
+- Allow `reply_and_wait` with `kind=continue` on a `STALLED` task so a wedged
+  turn can be nudged with a continuation prompt once the stall threshold fires.
+
 ## 2.1.5
 
 - Let `reply_and_wait` with `kind=continue` re-acquire a `COMPLETED` or

@@ -223,6 +223,53 @@ def _message_timestamps(message: object) -> list[tuple[str, datetime]]:
     return candidates
 
 
+def _message_info(message: object) -> dict[str, Any]:
+    if not isinstance(message, dict):
+        return {}
+    info = message.get("info")
+    return info if isinstance(info, dict) else message
+
+
+def last_turn_finished(messages: list[dict]) -> bool:
+    """Return whether the transcript ends on a completed assistant turn.
+
+    The live ``busy`` session flag can outlive the turn it describes when a
+    session is driven from another OpenCode process or a runtime wedges after
+    a response.  A completed assistant message (``info.time.completed`` plus a
+    ``step-finish`` part) with no newer user message is durable transcript
+    evidence that the turn finished, independent of any process's event bus.
+    """
+
+    if not isinstance(messages, list):
+        return False
+    for message in reversed(messages):
+        info = _message_info(message)
+        if info.get("role") != "assistant":
+            # A trailing user (or non-assistant) message means a newer turn is
+            # pending or in flight; the previous assistant turn is stale.
+            return False
+        time = info.get("time")
+        completed = (
+            isinstance(time, dict) and time.get("completed")
+        ) or info.get("completedAt") or info.get("completed_at")
+        if completed:
+            parts = message.get("parts")
+            if not isinstance(parts, list):
+                return False
+            return any(
+                isinstance(part, dict) and part.get("type") == "step-finish"
+                for part in parts
+            )
+        # An incomplete trailing assistant message means the turn is still in
+        # flight (or wedged); keep scanning earlier assistant messages only
+        # when this one never started (no parts yet).
+        parts = message.get("parts")
+        if isinstance(parts, list) and parts:
+            return False
+        continue
+    return False
+
+
 def latest_message_progress_at(
     messages: list[dict],
     *,

@@ -62,6 +62,8 @@ python3 scripts/install_plugin.py activate \
 
 MCP 进程在现有 SSE 连接内执行本地 pending-input probe 与进度诊断；这些 probe 不调用模型，**不消耗 Codex token**。不要轮询 `task_status`，也不要用 shell 循环等待。`server.heartbeat` 只代表传输活动；长时间没有 meaningful progress 时结果为 `STALLED`，此时检查诊断、处理 pending input，或在进度恢复后对同一 task 调用 `resume_wait`。进入 `STALLED` 不会 abort、删除 worktree 或创建新 session；恢复始终复用同一 task/session/worktree（resume the same task/session/worktree）。
 
+跨进程会话驱动的盲区由转录证据兜底：交互式 OpenCode 窗口与编排器使用的 headless 服务共享 session 存储，但事件总线是进程内的——交互窗口里跑完的 turn 永远不会在编排器的 SSE 上发出 `session.idle`，任务会停在 `RUNNING` 且 `session_status=busy`。此时以持久转录为准：末条 assistant 消息带 `step-finish` 且已 completed、无 pending input 时，`collect_result` 直接和解为 `COMPLETED` 并收结果；楔死 turn（末条 assistant 消息永不完成、busy 永真）不会被伪造为完成，stall 阈值触发后进入 `STALLED`，可用 `reply_and_wait` 的 `kind=continue`（放行 `STALLED`）向同一 session 注入催促消息开新 turn。
+
 当 Codex 客户端为 MCP 调用提供 `progressToken` 时，等待工具会通过标准 `notifications/progress` 在工具卡中显示节流后的执行摘要。摘要只包含连接、分析/编辑、工具名称、工作树更新和等待输入等状态；不包含推理文本、命令参数、文件内容或工具输出。通知由本地 MCP 进程发送，不会唤醒 Codex 模型，也不会产生额外的状态轮询。
 
 2.1.4 对外固定暴露 exactly eight public tools：`delegate_and_wait`、`reply_and_wait`、`resume_wait`、`task_status`、`read_transcript`、`collect_result`、`cancel_wait` 和 `abort_task`。`kind=continue` 复用 `reply_and_wait`，没有新增冗余工具；对 `PAUSED + idle + 无 pending input/tool` 的原任务直接放行，对 `COMPLETED`/`ABORTED` 的 terminal 任务要求显式 `payload.reacquire=true`（terminal 记录被 `SUPERSEDED`，陈旧 review 状态失效），并通过 continuation marker 对不确定发送进行无重发恢复。单工具取消实验的结论是 `production_supported=false`，因此本版本不提供 `cancel_tool_call`；只有显式 `abort_task` 才主动中止 OpenCode，之后的新 turn 无论由用户还是 Codex 发起，均可按上述实时证据或显式 reacquire 重新接管。

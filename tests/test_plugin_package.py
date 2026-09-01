@@ -28,7 +28,7 @@ class PluginPackageTest(unittest.TestCase):
         mcp = json.loads((ROOT / ".mcp.json").read_text())
 
         self.assertEqual(manifest["name"], "opencode-orchestrator")
-        self.assertEqual(manifest["version"], "2.1.5")
+        self.assertEqual(manifest["version"], "2.1.6")
         self.assertEqual(
             manifest["description"],
             "Delegate approved coding tasks to OpenCode and resume Codex for review.",
@@ -129,7 +129,7 @@ class PluginPackageTest(unittest.TestCase):
             client = MCPSubprocessClient(script, state_root=temporary / "state")
             try:
                 initialized = client.request(INITIALIZE)
-                self.assertEqual(initialized["result"]["serverInfo"]["version"], "2.1.5")
+                self.assertEqual(initialized["result"]["serverInfo"]["version"], "2.1.6")
                 client.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
                 listed = client.request(
                     {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}

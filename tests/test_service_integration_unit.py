@@ -1336,6 +1336,197 @@ class BridgeServiceTest(unittest.TestCase):
             self.assertEqual(state["execution_state"], "COMPLETED")
             self.assertEqual(state["phase"], Phase.REVIEWING)
 
+    def test_collect_reconciles_running_task_from_finished_transcript(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = FakeClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            # Reset to the wedge shape: the task believes it is still RUNNING
+            # (its SSE never saw session.idle), but the transcript ends on a
+            # completed assistant turn with a step-finish.
+            client.scenario = "idle_busy"
+
+            def mark_running(current):
+                current["execution_state"] = "RUNNING"
+                current["phase"] = Phase.PAUSED
+                current["review_state"] = "PENDING"
+                current["execution"] = dict(current.get("execution") or {})
+                current["execution"]["last_outcome"] = "timeout"
+
+            service.store.update(prepared["task_id"], mark_running)
+            completed_at = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+            client.message_payload = [
+                {
+                    "info": {
+                        "role": "user",
+                        "createdAt": completed_at,
+                    },
+                    "parts": [{"type": "text", "text": "PROCEED"}],
+                },
+                {
+                    "info": {
+                        "role": "assistant",
+                        "createdAt": completed_at,
+                        "completedAt": completed_at,
+                    },
+                    "parts": [
+                        {"type": "step-start"},
+                        {"type": "text", "text": "EXTERNAL_TURN_DONE"},
+                        {"type": "step-finish"},
+                    ],
+                },
+            ]
+
+            result = service.collect_result(prepared["task_id"])
+            state = service.store.load(prepared["task_id"])
+
+            self.assertEqual(result["assistant_result"], "EXTERNAL_TURN_DONE")
+            self.assertEqual(state["execution_state"], "COMPLETED")
+            self.assertEqual(state["phase"], Phase.REVIEWING)
+            self.assertEqual(state["review_state"], "REVIEWING")
+            self.assertEqual(state["execution"]["external_reentry_count"], 1)
+            self.assertEqual(client.created_session_count, 1)
+
+    def test_collect_reconciles_stalled_task_from_finished_transcript(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = FakeClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            client.scenario = "idle_busy"
+
+            def mark_stalled(current):
+                current["execution_state"] = "STALLED"
+                current["phase"] = Phase.STALLED
+                current["review_state"] = "PENDING"
+
+            service.store.update(prepared["task_id"], mark_stalled)
+            completed_at = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+            client.message_payload = [
+                {
+                    "info": {
+                        "role": "assistant",
+                        "createdAt": completed_at,
+                        "completedAt": completed_at,
+                    },
+                    "parts": [
+                        {"type": "step-start"},
+                        {"type": "text", "text": "STALLED_TURN_ACTUALLY_DONE"},
+                        {"type": "step-finish"},
+                    ],
+                },
+            ]
+
+            result = service.collect_result(prepared["task_id"])
+            state = service.store.load(prepared["task_id"])
+
+            self.assertEqual(result["assistant_result"], "STALLED_TURN_ACTUALLY_DONE")
+            self.assertEqual(state["execution_state"], "COMPLETED")
+            self.assertEqual(state["phase"], Phase.REVIEWING)
+            self.assertEqual(state["execution"]["external_reentry_count"], 1)
+
+    def test_collect_does_not_reconcile_incomplete_trailing_turn(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = FakeClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            client.scenario = "idle_busy"
+
+            def mark_running(current):
+                current["execution_state"] = "RUNNING"
+                current["phase"] = Phase.PAUSED
+                current["review_state"] = "PENDING"
+
+            service.store.update(prepared["task_id"], mark_running)
+            activity_at = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+            client.message_payload = [
+                {
+                    "info": {
+                        "role": "user",
+                        "createdAt": activity_at,
+                    },
+                    "parts": [{"type": "text", "text": "CONTINUE"}],
+                },
+                {
+                    "info": {"role": "assistant", "createdAt": activity_at},
+                    "parts": [
+                        {"type": "step-start"},
+                        {"type": "reasoning", "text": ""},
+                    ],
+                },
+            ]
+
+            with self.assertRaisesRegex(ValueError, "RUNNING"):
+                service.collect_result(prepared["task_id"])
+
+            state = service.store.load(prepared["task_id"])
+            self.assertEqual(state["execution_state"], "RUNNING")
+
+    def test_continue_allows_stalled_task_to_nudge_wedged_session(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = ContinueOrderingClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+
+            def mark_stalled(current):
+                current["execution_state"] = "STALLED"
+                current["phase"] = Phase.STALLED
+
+            service.store.update(prepared["task_id"], mark_stalled)
+
+            result = service.reply(
+                prepared["task_id"],
+                "continue",
+                {"text": "The previous turn wedged; continue the same scope."},
+                timeout_seconds=2,
+            )
+            state = service.store.load(prepared["task_id"])
+
+            self.assertEqual(result["outcome"], "idle")
+            self.assertEqual(client.created_session_count, 1)
+            self.assertEqual(client.prompt_count, 2)
+            self.assertIn(
+                f"[oc-task:{prepared['task_id']}] continuation 1",
+                client.last_prompt["text"],
+            )
+            self.assertEqual(state["execution_state"], "COMPLETED")
+            self.assertEqual(
+                state["execution"]["continuation"]["dispatch_state"],
+                "SENT",
+            )
+
+    def test_continue_rejects_busy_stalled_session(self):
+        with TemporaryDirectory() as tmp:
+            source = create_repo(Path(tmp) / "source")
+            client = ContinueOrderingClient()
+            service = self.make_service(tmp, client)
+            prepared = self._prime_reviewing_task(service, source)
+            client.scenario = "idle_busy"
+
+            def mark_stalled(current):
+                current["execution_state"] = "STALLED"
+                current["phase"] = Phase.STALLED
+
+            service.store.update(prepared["task_id"], mark_stalled)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "still busy; use resume_wait",
+            ):
+                service.reply(
+                    prepared["task_id"],
+                    "continue",
+                    {"text": "Continue the same scope."},
+                    timeout_seconds=2,
+                )
+
+            state = service.store.load(prepared["task_id"])
+            self.assertEqual(state["execution_state"], "STALLED")
+            self.assertEqual(client.prompt_count, 1)
+
     def test_large_unapproved_task_stops_before_worktree_creation(self):
         with TemporaryDirectory() as tmp:
             source = create_repo(Path(tmp) / "source")

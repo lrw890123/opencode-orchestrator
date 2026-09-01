@@ -40,6 +40,7 @@ from .policy import classify_risk
 from .progress import (
     idle_seconds,
     is_meaningful_progress,
+    last_turn_finished,
     latest_message_progress_at,
     pending_tools,
 )
@@ -989,6 +990,7 @@ class BridgeService:
         progress.setdefault("pending_questions", [])
         progress.setdefault("diagnostic_error", None)
         progress.setdefault("last_input_probe_at", None)
+        progress.setdefault("last_turn_finished", False)
 
         def pending(
             method_name: str,
@@ -1045,6 +1047,7 @@ class BridgeService:
             if self._timestamp_is_newer(latest, progress.get("last_progress_at")):
                 progress["last_progress_at"] = latest
                 progress["last_progress_event"] = "message.updated"
+            progress["last_turn_finished"] = last_turn_finished(messages)
             progress["pending_permissions"] = [
                 self._visible_permission(item) for item in permissions
             ]
@@ -1145,6 +1148,56 @@ class BridgeService:
         }:
             return state["execution_state"]
         return None
+
+    def _reconcile_finished_turn(
+        self,
+        task_id: str,
+        state: dict,
+        session_id: str | None,
+    ) -> dict:
+        """Adopt durable transcript evidence that a running task's turn ended.
+
+        A session driven from another OpenCode process (or a runtime whose
+        ``busy`` flag outlived its turn) never emits ``session.idle`` on this
+        process's event stream, so the task can stay RUNNING forever.  When
+        the transcript ends on a completed assistant turn and no input is
+        pending, that transcript evidence is authoritative: persist the
+        transition to COMPLETED/COLLECTING and let collection proceed.
+        """
+
+        if state["execution_state"] not in {
+            ExecutionState.RUNNING.value,
+            ExecutionState.STALLED.value,
+        } or not session_id:
+            return state
+        if state.get("opencode", {}).get("dispatch_state") != "SENT":
+            return state
+        client = self._client(state)
+        live_progress = self._progress_snapshot(
+            state,
+            client,
+            session_id,
+            persist=False,
+        )
+        if live_progress.get("diagnostic_error") is not None:
+            return state
+        if (
+            live_progress.get("pending_permissions")
+            or live_progress.get("pending_questions")
+            or live_progress.get("pending_tools")
+        ):
+            return state
+        if live_progress.get("last_turn_finished") is not True:
+            return state
+        return self._persist_terminal_reentry(
+            task_id,
+            live_progress,
+            (
+                ExecutionState.COMPLETED.value,
+                Phase.COLLECTING,
+                ReviewState.READY.value,
+            ),
+        )
 
     def _reentry_probe_due(self, state: dict) -> bool:
         """Return whether a terminal-reentry activity probe may run now."""
@@ -1298,6 +1351,8 @@ class BridgeService:
             if current.get("execution_state") not in {
                 ExecutionState.COMPLETED.value,
                 ExecutionState.ABORTED.value,
+                ExecutionState.RUNNING.value,
+                ExecutionState.STALLED.value,
             }:
                 return
             abort = current.get("abort") or {}
@@ -2256,6 +2311,11 @@ class BridgeService:
                     raise ValueError(
                         "cannot continue while an abort request is still in progress"
                     )
+            elif state["execution_state"] == ExecutionState.STALLED.value:
+                if state.get("phase") != Phase.STALLED:
+                    raise ValueError(
+                        f"cannot continue session in phase {state['phase']}"
+                    )
             elif (
                 state["execution_state"] != ExecutionState.RUNNING.value
                 or state["phase"] != Phase.PAUSED
@@ -2596,6 +2656,8 @@ class BridgeService:
                     live_progress,
                     projection,
                 )
+        if state["execution_state"] != ExecutionState.COMPLETED.value:
+            state = self._reconcile_finished_turn(task_id, state, session_id)
         if state["execution_state"] != ExecutionState.COMPLETED.value:
             raise ValueError(
                 f"cannot collect task in execution state {state['execution_state']}"

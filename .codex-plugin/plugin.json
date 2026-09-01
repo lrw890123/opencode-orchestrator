@@ -1,6 +1,6 @@
 {
   "name": "opencode-orchestrator",
-  "version": "2.1.5",
+  "version": "2.1.6",
   "description": "Delegate approved coding tasks to OpenCode and resume Codex for review.",
   "author": {
     "name": "OpenCode Orchestrator contributors"
